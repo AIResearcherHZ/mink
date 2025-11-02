@@ -69,3 +69,7 @@ mink also heavily adapts code from the following libraries:
 
 * The lie algebra library that powers the transforms in mink is adapted from [jaxlie](https://github.com/brentyi/jaxlie).
 * The collision avoidance constraint is adapted from [dm_robotics](https://github.com/google-deepmind/dm_robotics/tree/main/cpp/controllers)'s LSQP controller.
+
+## References
+
+- The code implementing operations on matrix Lie groups contains references to numbered equations from the following paper: _[A micro lie theory for state estimation in robotics](https://arxiv.org/pdf/1812.01537), Joan Solà, Jeremie Deray, and Dinesh Atchuthan, arXiv preprint arXiv:1812.01537 (2018)_.
