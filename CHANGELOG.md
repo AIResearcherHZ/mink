@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+* Associate loggers with the name "mink".
 * Improve test coverage.
 * Add more tests to `test_configuration_limit.py` and `test_velocity_limit.py`.
 
