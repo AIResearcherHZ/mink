@@ -136,11 +136,11 @@ class EqualityConstraintTask(Task):
         gain: float = 1.0,
         lm_damping: float = 0.0,
     ):
+        self._logger = logging.getLogger(__package__)
         self._eq_ids = self._resolve_equality_ids(model, equalities)
         self._eq_types = model.eq_type[self._eq_ids].copy()
         self._neq_total = len(self._eq_ids)
         self._mask: np.ndarray | None = None
-        self._logger = logging.getLogger(__package__)
 
         super().__init__(cost=np.zeros((1,)), gain=gain, lm_damping=lm_damping)
         self.set_cost(cost)
