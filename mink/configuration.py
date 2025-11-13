@@ -49,6 +49,7 @@ class Configuration:
         """
         self.model = model
         self.data = mujoco.MjData(model)
+        self.logger = logging.getLogger(__package__)
         self.update(q=q)
 
     def update(self, q: Optional[np.ndarray] = None) -> None:
@@ -111,7 +112,7 @@ class Configuration:
                         model=self.model,
                     )
                 else:
-                    logging.debug(
+                    self.logger.debug(
                         f"Value {qval:.2f} at index {jnt} is outside of its limits: "
                         f"[{qmin:.2f}, {qmax:.2f}]"
                     )

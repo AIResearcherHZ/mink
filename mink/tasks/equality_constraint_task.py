@@ -136,6 +136,7 @@ class EqualityConstraintTask(Task):
         gain: float = 1.0,
         lm_damping: float = 0.0,
     ):
+        self._logger = logging.getLogger(__package__)
         self._eq_ids = self._resolve_equality_ids(model, equalities)
         self._eq_types = model.eq_type[self._eq_ids].copy()
         self._neq_total = len(self._eq_ids)
@@ -239,7 +240,7 @@ class EqualityConstraintTask(Task):
                 )
         else:
             eq_ids = list(range(model.neq))
-            logging.info("Regulating %d equality constraints", len(eq_ids))
+            self._logger.info("Regulating %d equality constraints", len(eq_ids))
 
         # Ensure we have at least 1 constraint.
         if len(eq_ids) == 0:
