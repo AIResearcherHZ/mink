@@ -162,6 +162,81 @@ class TestSolveIK(absltest.TestCase):
             mink.solve_ik(self.configuration, [task], dt=1e-3, solver="daqp")
         self.assertEqual(str(cm.exception), "QP solver daqp failed to find a solution.")
 
+    def test_equality_constraints_freeze_dofs(self):
+        """DOF freezing via equality constraints keeps specified DOFs constant."""
+        configuration = mink.Configuration(self.model)
+        configuration.update_from_keyframe("home")
+
+        # Store initial configuration.
+        q_init = configuration.q.copy()
+
+        # Create a task to move the end effector.
+        task = mink.FrameTask(
+            "attachment_site", "site", position_cost=1.0, orientation_cost=1.0
+        )
+        transform_init_to_world = configuration.get_transform_frame_to_world(
+            "attachment_site",
+            "site",
+        )
+        transform_target_to_init = mink.SE3.from_translation(np.array([0, 0, 0.05]))
+        transform_target_to_world = transform_init_to_world @ transform_target_to_init
+        task.set_target(transform_target_to_world)
+
+        # Create DOF freezing constraint for first two joints.
+        frozen_dofs = [0, 1]
+        freeze_task = mink.DofFreezingTask(model=self.model, dof_indices=frozen_dofs)
+
+        dt = 5e-3  # [s]
+
+        # Solve IK with equality constraint.
+        for _ in range(20):
+            velocity = mink.solve_ik(
+                configuration,
+                [task],
+                constraints=[freeze_task],
+                limits=self.limits,
+                dt=dt,
+                solver="daqp",  # DAQP supports equality constraints.
+            )
+            configuration.integrate_inplace(velocity, dt)
+
+        # Check that frozen DOFs haven't changed.
+        for dof in frozen_dofs:
+            self.assertAlmostEqual(
+                configuration.q[dof],
+                q_init[dof],
+                places=10,
+                msg=f"DOF {dof} should remain frozen",
+            )
+
+        # Check that at least some other DOFs have changed.
+        other_dofs = [i for i in range(self.model.nv) if i not in frozen_dofs]
+        dof_changes = [abs(configuration.q[i] - q_init[i]) for i in other_dofs]
+        self.assertGreater(
+            max(dof_changes),
+            1e-3,
+            msg="At least one non-frozen DOF should have moved",
+        )
+
+    def test_equality_constraints_none_by_default(self):
+        """By default, no equality constraints are set."""
+        problem = mink.build_ik(self.configuration, [], dt=1.0)
+        self.assertIsNone(problem.A)
+        self.assertIsNone(problem.b)
+
+    def test_equality_constraints_set_when_provided(self):
+        """When constraints are provided, A and b matrices are set."""
+        freeze_task = mink.DofFreezingTask(model=self.model, dof_indices=[0, 1])
+        problem = mink.build_ik(
+            self.configuration, [], constraints=[freeze_task], dt=1.0
+        )
+        self.assertIsNotNone(problem.A)
+        self.assertIsNotNone(problem.b)
+        assert problem.A is not None  # Type narrowing for type checker
+        assert problem.b is not None  # Type narrowing for type checker
+        self.assertEqual(problem.A.shape, (2, self.model.nv))
+        self.assertEqual(problem.b.shape, (2,))
+
 
 if __name__ == "__main__":
     absltest.main()

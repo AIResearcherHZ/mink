@@ -14,6 +14,8 @@ All notable changes to this project will be documented in this file.
 * Associate loggers with the name "mink".
 * Improve test coverage.
 * Add more tests to `test_configuration_limit.py` and `test_velocity_limit.py`.
+* Add support for equality constraints in `solve_ik` and `build_ik` via the `constraints` parameter.
+* Add `DofFreezingTask` to freeze specific degrees of freedom using equality constraints.
 
 ### Bugfix
 

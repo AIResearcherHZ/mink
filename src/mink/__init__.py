@@ -33,6 +33,7 @@ from .solve_ik import build_ik as build_ik
 from .solve_ik import solve_ik as solve_ik
 from .tasks import ComTask as ComTask
 from .tasks import DampingTask as DampingTask
+from .tasks import DofFreezingTask as DofFreezingTask
 from .tasks import EqualityConstraintTask as EqualityConstraintTask
 from .tasks import FrameTask as FrameTask
 from .tasks import KineticEnergyRegularizationTask as KineticEnergyRegularizationTask

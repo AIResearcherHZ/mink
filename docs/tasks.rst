@@ -36,6 +36,12 @@ Equality constraint task
 .. automodule:: mink.tasks.equality_constraint_task
     :members:
 
+DOF freezing task
+-----------------
+
+.. automodule:: mink.tasks.dof_freezing_task
+    :members:
+
 Regularization Tasks
 ====================
 

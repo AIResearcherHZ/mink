@@ -8,7 +8,7 @@ import qpsolvers
 from .configuration import Configuration
 from .exceptions import NoSolutionFound
 from .limits import ConfigurationLimit, Limit
-from .tasks import BaseTask, Objective
+from .tasks import BaseTask, Objective, Task
 
 
 def _compute_qp_objective(
@@ -41,12 +41,40 @@ def _compute_qp_inequalities(
     return np.vstack(G_list), np.hstack(h_list)
 
 
+def _compute_qp_equalities(
+    configuration: Configuration,
+    constraints: Sequence[Task] | None,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    r"""Compute equality constraints for the quadratic program.
+
+    Args:
+        configuration: Robot configuration to read kinematics from.
+        constraints: List of tasks to enforce via equality constraints.
+
+    Returns:
+        Pair :math:`(A, b)` of equality matrix and vector representing the
+        equation :math:`A \Delta q = b`, or ``(None, None)`` if there is no
+        equality constraint.
+    """
+    if not constraints:
+        return None, None
+    A_list = []
+    b_list = []
+    for task in constraints:
+        jacobian = task.compute_jacobian(configuration)
+        feedback = -task.gain * task.compute_error(configuration)
+        A_list.append(jacobian)
+        b_list.append(feedback)
+    return np.vstack(A_list), np.hstack(b_list)
+
+
 def build_ik(
     configuration: Configuration,
     tasks: Sequence[BaseTask],
     dt: float,
     damping: float = 1e-12,
     limits: Sequence[Limit] | None = None,
+    constraints: Sequence[Task] | None = None,
 ) -> qpsolvers.Problem:
     r"""Build the quadratic program given the current configuration and tasks.
 
@@ -56,7 +84,8 @@ def build_ik(
 
         \begin{align*}
             \min_{\Delta q} & \frac{1}{2} \Delta q^T H \Delta q + c^T \Delta q \\
-            \text{s.t.} \quad & G \Delta q \leq h
+            \text{s.t.} \quad & G \Delta q \leq h \\
+            & A \Delta q = b
         \end{align*}
 
     where :math:`\Delta q = v / dt` is the vector of joint displacements.
@@ -70,13 +99,16 @@ def build_ik(
             dofs, including floating-base coordinates.
         limits: List of limits to enforce. Set to empty list to disable. If None,
             defaults to a configuration limit.
+        constraints: List of tasks to enforce as equality constraints. These tasks
+            will be satisfied exactly rather than in a least-squares sense.
 
     Returns:
         Quadratic program of the inverse kinematics problem.
     """
     P, q = _compute_qp_objective(configuration, tasks, damping)
     G, h = _compute_qp_inequalities(configuration, limits, dt)
-    return qpsolvers.Problem(P, q, G, h)
+    A, b = _compute_qp_equalities(configuration, constraints)
+    return qpsolvers.Problem(P, q, G, h, A, b)
 
 
 def solve_ik(
@@ -87,6 +119,7 @@ def solve_ik(
     damping: float = 1e-12,
     safety_break: bool = False,
     limits: Sequence[Limit] | None = None,
+    constraints: Sequence[Task] | None = None,
     **kwargs,
 ) -> np.ndarray:
     r"""Solve the differential inverse kinematics problem.
@@ -107,6 +140,8 @@ def solve_ik(
             warning and continue execution.
         limits: List of limits to enforce. Set to empty list to disable. If None,
             defaults to a configuration limit.
+        constraints: List of tasks to enforce as equality constraints. These tasks
+            will be satisfied exactly rather than in a least-squares sense.
         kwargs: Keyword arguments to forward to the backend QP solver.
 
     Raises:
@@ -118,7 +153,7 @@ def solve_ik(
         Velocity :math:`v` in tangent space.
     """
     configuration.check_limits(safety_break=safety_break)
-    problem = build_ik(configuration, tasks, dt, damping, limits)
+    problem = build_ik(configuration, tasks, dt, damping, limits, constraints)
     result = qpsolvers.solve_problem(problem, solver=solver, **kwargs)
     if not result.found:
         raise NoSolutionFound(solver)
