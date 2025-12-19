@@ -45,17 +45,6 @@ def _compute_qp_equalities(
     configuration: Configuration,
     constraints: Sequence[Task] | None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    r"""Compute equality constraints for the quadratic program.
-
-    Args:
-        configuration: Robot configuration to read kinematics from.
-        constraints: List of tasks to enforce via equality constraints.
-
-    Returns:
-        Pair :math:`(A, b)` of equality matrix and vector representing the
-        equation :math:`A \Delta q = b`, or ``(None, None)`` if there is no
-        equality constraint.
-    """
     if not constraints:
         return None, None
     A_list = []
@@ -88,7 +77,7 @@ def build_ik(
             & A \Delta q = b
         \end{align*}
 
-    where :math:`\Delta q = v / dt` is the vector of joint displacements.
+    where :math:`v = \Delta q / dt` is the velocity in tangent space.
 
     Args:
         configuration: Robot configuration.
@@ -105,10 +94,10 @@ def build_ik(
     Returns:
         Quadratic program of the inverse kinematics problem.
     """
-    P, q = _compute_qp_objective(configuration, tasks, damping)
+    H, c = _compute_qp_objective(configuration, tasks, damping)
     G, h = _compute_qp_inequalities(configuration, limits, dt)
     A, b = _compute_qp_equalities(configuration, constraints)
-    return qpsolvers.Problem(P, q, G, h, A, b)
+    return qpsolvers.Problem(H, c, G, h, A, b)
 
 
 def solve_ik(
