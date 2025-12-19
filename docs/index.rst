@@ -15,17 +15,18 @@ mink is a library for differential inverse kinematics in Python, based on the `M
 Installation
 ------------
 
-You can install `mink` with `pip`:
+Install from PyPI:
 
 .. code:: bash
 
-   pip install mink
+   uv add mink
 
-To include example dependencies:
+Or clone and run locally:
 
 .. code:: bash
 
-   pip install mink[examples]
+   git clone https://github.com/kevinzakka/mink.git && cd mink
+   uv sync
 
 .. toctree::
     :maxdepth: 1
