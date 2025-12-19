@@ -119,6 +119,7 @@ class TestRelativeFrameTask(absltest.TestCase):
         task.set_target_from_configuration(self.configuration)
 
         pose = self.configuration.get_transform("pelvis", "body", "torso_link", "body")
+        assert task.transform_target_to_root is not None
         np.testing.assert_array_equal(
             task.transform_target_to_root.translation(), pose.translation()
         )

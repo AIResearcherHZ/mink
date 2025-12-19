@@ -39,6 +39,7 @@ class TestConfigurationLimit(absltest.TestCase):
         nv = self.configuration.nv
         nb = nv - len(get_freejoint_dims(self.model)[1])
         self.assertEqual(len(limit.indices), nb)
+        assert limit.projection_matrix is not None
         self.assertEqual(limit.projection_matrix.shape, (nb, nv))
 
     def test_indices(self):
@@ -75,6 +76,7 @@ class TestConfigurationLimit(absltest.TestCase):
         limit = ConfigurationLimit(model)
         nb = 1  # 1 limited joint.
         nv = model.nv
+        assert limit.projection_matrix is not None
         self.assertEqual(limit.projection_matrix.shape, (nb, nv))
         self.assertEqual(len(limit.indices), nb)
         expected_lower = np.array([-mujoco.mjMAXVAL, 0])
@@ -102,6 +104,7 @@ class TestConfigurationLimit(absltest.TestCase):
         limit = ConfigurationLimit(model)
         nb = 1  # 1 limited joint.
         nv = model.nv
+        assert limit.projection_matrix is not None
         self.assertEqual(limit.projection_matrix.shape, (nb, nv))
         self.assertEqual(len(limit.indices), nb)
         expected_lower = np.asarray(
@@ -128,6 +131,7 @@ class TestConfigurationLimit(absltest.TestCase):
         configuration = Configuration(model)
         limit = ConfigurationLimit(model)
         G, h = limit.compute_qp_inequalities(configuration, dt=dt)
+        assert G is not None and h is not None
         velocities = {
             "shoulder_pan_joint": np.pi,
             "shoulder_lift_joint": np.pi,
@@ -153,6 +157,7 @@ class TestConfigurationLimit(absltest.TestCase):
             +slack_vel * np.ones((self.configuration.nv,)), dt
         )
         _, h = limit.compute_qp_inequalities(self.configuration, dt)
+        assert h is not None
         self.assertLess(np.max(h), slack_vel * dt + tol)
         self.assertGreater(np.min(h), -slack_vel * dt - tol)
 
@@ -161,6 +166,8 @@ class TestConfigurationLimit(absltest.TestCase):
         limit = ConfigurationLimit(self.model, gain=0.95)
         G1, h1 = limit.compute_qp_inequalities(self.configuration, dt=1e-3)
         G2, h2 = limit.compute_qp_inequalities(self.configuration, dt=0.2)
+        assert G1 is not None and h1 is not None
+        assert G2 is not None and h2 is not None
         self.assertTrue(np.allclose(G1, G2))
         self.assertTrue(np.allclose(h1, h2))
 
@@ -170,6 +177,7 @@ class TestConfigurationLimit(absltest.TestCase):
 
         # dt is irrelevant for configuration limits; pass anything.
         G, h = limit.compute_qp_inequalities(self.configuration, dt=0.1)
+        assert G is not None and h is not None
 
         # We use linprog to construct a strictly feasible delta_q for the inequality
         # set `G Δq ≤ h - eps``. Shrinking the RHS by eps guarantees strict slack if a

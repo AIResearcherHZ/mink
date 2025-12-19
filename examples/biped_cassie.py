@@ -76,7 +76,7 @@ def main():
             for i, foot_task in enumerate(feet_tasks):
                 foot_task.set_target(SE3.from_mocap_id(data, feet_mid[i]))
 
-            vel = mink.solve_ik(configuration, tasks, rate.dt, solver, 1e-1)
+            vel = mink.solve_ik(configuration, tasks, rate.dt, solver, damping=1e-1)
             configuration.integrate_inplace(vel, rate.dt)
             mujoco.mj_camlight(model, data)
 

@@ -4,11 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+* Switch to `uv`.
+* Deprecate Python 3.8 and 3.9 support.
+
 ### Added
 
 * Associate loggers with the name "mink".
 * Improve test coverage.
 * Add more tests to `test_configuration_limit.py` and `test_velocity_limit.py`.
+
+### Bugfix
+
+* Fix pyright type errors on Python 3.10 by explicitly casting numpy scalars to Python floats.
 
 ## [0.0.13] - 2025-09-12
 

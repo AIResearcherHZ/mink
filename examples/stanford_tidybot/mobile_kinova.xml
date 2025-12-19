@@ -55,6 +55,7 @@
   </asset>
 
   <worldbody>
+    <light pos="0 0 3"/>
     <body name="base_link">
       <inertial pos="0 0 0.035" mass="60" diaginertia="0.001 0.001 0.001"/>
       <joint name="joint_x" type="slide" axis="1 0 0"/>
@@ -120,7 +121,7 @@
                       <geom class="gen3_visual" mesh="bracelet_with_vision_link"/>
                       <geom class="gen3_collision" mesh="bracelet_with_vision_link"/>
                       <camera name="wrist" pos="0 -0.05639 -0.058475" quat="0 0 0 1" fovy="41.83792730009236"
-                        resolution="640 480"/>           
+                        resolution="640 480"/>
                       <site name="pinch_site" pos="0 0 -0.181525" quat="0 1 0 0"/>
                     </body>
                   </body>

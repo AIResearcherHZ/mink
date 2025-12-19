@@ -35,14 +35,14 @@ def construct_model() -> mujoco.MjModel:
     hand = mujoco.MjSpec.from_file(_HAND_XML.as_posix())
 
     palm = hand.body("palm_lower")
-    palm.pos = (0.03, 0.06, -0.0925)
-    palm.quat = (0, 0.707, 0.707, 0)
+    palm.pos[:] = (0.03, 0.06, -0.0925)
+    palm.quat[:] = (0, 0.707, 0.707, 0)
     site = arm.site("pinch_site")
     arm.attach(hand, prefix="leap_right/", site=site)
 
     for key in arm.keys:
         if key.name in ["home", "retract"]:
-            key.delete()
+            arm.delete(key)
     arm.add_key(name="home", qpos=HOME_QPOS)
 
     for finger in fingers:
@@ -86,7 +86,6 @@ if __name__ == "__main__":
     # When move the base, mainly focus on the motion on xy plane, minimize the rotation.
     posture_cost = np.zeros((model.nv,))
     posture_cost[2] = 1e-3  # Mobile Base.
-    # posture_cost[-16:] = 5e-2  # Leap Hand.
     posture_cost[-16:] = 1e-3  # Leap Hand.
 
     posture_task = mink.PostureTask(model, cost=posture_cost)
@@ -153,8 +152,6 @@ if __name__ == "__main__":
         T_eef_prev = configuration.get_transform_frame_to_world("pinch_site", "site")
 
         rate = RateLimiter(frequency=50.0, warn=False)
-        dt = rate.period
-        t = 0.0
         while viewer.is_running():
             # Update task target.
             T_wt = mink.SE3.from_mocap_name(model, data, "pinch_site_target")
@@ -167,34 +164,37 @@ if __name__ == "__main__":
                 )
                 task.set_target(T_pm)
 
+            T_eef = configuration.get_transform_frame_to_world("pinch_site", "site")
+            T = T_eef @ T_eef_prev.inverse()
+            T_eef_prev = T_eef.copy()
+
             for finger in fingers:
-                T_eef = configuration.get_transform_frame_to_world("pinch_site", "site")
-                T = T_eef @ T_eef_prev.inverse()
-                T_w_mocap = mink.SE3.from_mocap_name(model, data, f"{finger}_target")
+                mocap_id = model.body(f"{finger}_target").mocapid[0]
+                T_w_mocap = mink.SE3.from_mocap_id(data, mocap_id)
                 T_w_mocap_new = T @ T_w_mocap
-                data.mocap_pos[model.body(f"{finger}_target").mocapid[0]] = (
-                    T_w_mocap_new.translation()
-                )
-                data.mocap_quat[model.body(f"{finger}_target").mocapid[0]] = (
-                    T_w_mocap_new.rotation().wxyz
-                )
+                data.mocap_pos[mocap_id] = T_w_mocap_new.translation()
+                data.mocap_quat[mocap_id] = T_w_mocap_new.rotation().wxyz
 
             # Compute velocity and integrate into the next configuration.
             for i in range(max_iters):
                 if key_callback.fix_base:
                     vel = mink.solve_ik(
-                        configuration, [*tasks, damping_task], rate.dt, solver, 1e-3
+                        configuration,
+                        [*tasks, damping_task],
+                        rate.dt,
+                        solver,
+                        damping=1e-3,
                     )
                 else:
-                    vel = mink.solve_ik(configuration, tasks, rate.dt, solver, 1e-3)
+                    vel = mink.solve_ik(
+                        configuration, tasks, rate.dt, solver, damping=1e-3
+                    )
                 configuration.integrate_inplace(vel, rate.dt)
 
                 # Exit condition.
-                pos_achieved = True
-                ori_achieved = True
                 err = end_effector_task.compute_error(configuration)
-                pos_achieved &= bool(np.linalg.norm(err[:3]) <= pos_threshold)
-                ori_achieved &= bool(np.linalg.norm(err[3:]) <= ori_threshold)
+                pos_achieved = bool(np.linalg.norm(err[:3]) <= pos_threshold)
+                ori_achieved = bool(np.linalg.norm(err[3:]) <= ori_threshold)
                 if pos_achieved and ori_achieved:
                     break
 
@@ -204,9 +204,6 @@ if __name__ == "__main__":
             else:
                 mujoco.mj_forward(model, data)
 
-            T_eef_prev = T_eef.copy()
-
             # Visualize at fixed FPS.
             viewer.sync()
             rate.sleep()
-            t += dt

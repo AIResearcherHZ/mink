@@ -30,6 +30,7 @@ class TestVelocityLimit(absltest.TestCase):
         nv = self.configuration.nv
         nb = nv - 6
         self.assertEqual(len(limit.indices), nb)
+        assert limit.projection_matrix is not None
         self.assertEqual(limit.projection_matrix.shape, (nb, nv))
 
     def test_indices(self):
@@ -56,10 +57,12 @@ class TestVelocityLimit(absltest.TestCase):
         limit = VelocityLimit(self.model, limit_subset)
         nb = 3
         nv = self.model.nv
+        assert limit.projection_matrix is not None
         self.assertEqual(limit.projection_matrix.shape, (nb, nv))
         self.assertEqual(len(limit.indices), nb)
         np.testing.assert_allclose(limit.limit, np.asarray([np.pi] * nb))
         G, h = limit.compute_qp_inequalities(self.configuration, 1e-3)
+        assert G is not None and h is not None
         self.assertEqual(G.shape, (2 * nb, nv))
         self.assertEqual(h.shape, (2 * nb,))
 
@@ -87,6 +90,7 @@ class TestVelocityLimit(absltest.TestCase):
         limit = VelocityLimit(model, velocities)
         nb = 3 + 1
         self.assertEqual(len(limit.indices), nb)
+        assert limit.projection_matrix is not None
         self.assertEqual(limit.projection_matrix.shape, (nb, model.nv))
 
     def test_ball_joint_invalid_limit_shape(self):
@@ -145,6 +149,8 @@ class TestVelocityLimit(absltest.TestCase):
         vlim = VelocityLimit(self.model, self.velocities)
         G1, h1 = vlim.compute_qp_inequalities(self.configuration, dt=0.1)
         G2, h2 = vlim.compute_qp_inequalities(self.configuration, dt=0.2)
+        assert G1 is not None and h1 is not None
+        assert G2 is not None and h2 is not None
         assert np.allclose(G1, G2)
         assert np.allclose(h2, 2.0 * h1)
 

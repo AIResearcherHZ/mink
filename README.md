@@ -24,8 +24,8 @@ If you use mink in your research, please cite it as follows:
   author = {Zakka, Kevin},
   title = {{Mink: Python inverse kinematics based on MuJoCo}},
   year = {2025},
-  month = may,
-  version = {0.0.11},
+  month = dec,
+  version = {1.0.0},
   url = {https://github.com/kevinzakka/mink},
   license = {Apache-2.0}
 }
@@ -33,29 +33,43 @@ If you use mink in your research, please cite it as follows:
 
 ## Installation
 
-You can install `mink` using `pip`:
+Install from PyPI:
 
 ```bash
-pip install mink
+uv add mink
 ```
 
-To include the example dependencies:
+Or clone and run locally:
 
 ```bash
-pip install "mink[examples]"
+git clone https://github.com/kevinzakka/mink.git && cd mink
+uv sync
 ```
 
 ## Examples
 
+To run an example:
+
+```bash
+# Linux
+uv run examples/arm_ur5e.py
+
+# macOS
+./fix_mjpython_macos.sh  # So that mjpython works with uv.
+uv run mjpython examples/arm_ur5e.py
+```
+
 mink works with a variety of robots, including:
 
-* Arms: [UR5e](https://github.com/kevinzakka/mink/blob/main/examples/arm_ur5e_actuators.py), [iiwa14](https://github.com/kevinzakka/mink/blob/main/examples/arm_iiwa.py), [bimanual iiwa14](https://github.com/kevinzakka/mink/blob/main/examples/dual_iiwa.py)
-* Humanoids: [Unitree G1](https://github.com/kevinzakka/mink/blob/main/examples/humanoid_g1.py), [Unitree H1](https://github.com/kevinzakka/mink/blob/main/examples/humanoid_h1.py)
-* Quadrupeds: [Unitree Go1](https://github.com/kevinzakka/mink/blob/main/examples/quadruped_go1.py), [Boston Dynamics Spot](https://github.com/kevinzakka/mink/blob/main/examples/quadruped_spot.py)
-* Hands: [Shadow Hand](https://github.com/kevinzakka/mink/blob/main/examples/hand_shadow.py), [Allegro Hand](https://github.com/kevinzakka/mink/blob/main/examples/arm_hand_iiwa_allegro.py)
-* Mobile manipulators: [Stanford TidyBot](https://github.com/kevinzakka/mink/blob/main/examples/mobile_tidybot.py), [Hello Robot Stretch](https://github.com/kevinzakka/mink/blob/main/examples/mobile_stretch.py)
+* **Single arms**: [Franka Panda](https://github.com/kevinzakka/mink/blob/main/examples/arm_panda.py), [UR5e](https://github.com/kevinzakka/mink/blob/main/examples/arm_ur5e.py), [KUKA iiwa14](https://github.com/kevinzakka/mink/blob/main/examples/arm_iiwa.py), [ALOHA 2](https://github.com/kevinzakka/mink/blob/main/examples/arm_aloha.py)
+* **Dual arms**: [Dual Panda](https://github.com/kevinzakka/mink/blob/main/examples/dual_panda.py), [Dual iiwa14](https://github.com/kevinzakka/mink/blob/main/examples/dual_iiwa.py), [Flying Dual UR5e](https://github.com/kevinzakka/mink/blob/main/examples/flying_dual_arm_ur5e.py)
+* **Arm + hand**: [iiwa14 + Allegro](https://github.com/kevinzakka/mink/blob/main/examples/arm_hand_iiwa_allegro.py), [xArm + LEAP](https://github.com/kevinzakka/mink/blob/main/examples/arm_hand_xarm_leap.py)
+* **Dexterous hands**: [Shadow Hand](https://github.com/kevinzakka/mink/blob/main/examples/hand_shadow.py)
+* **Humanoids**: [Unitree G1](https://github.com/kevinzakka/mink/blob/main/examples/humanoid_g1.py), [Unitree H1](https://github.com/kevinzakka/mink/blob/main/examples/humanoid_h1.py), [Apptronik Apollo](https://github.com/kevinzakka/mink/blob/main/examples/humanoid_apollo.py)
+* **Legged robots**: [Unitree Go1](https://github.com/kevinzakka/mink/blob/main/examples/quadruped_go1.py), [Boston Dynamics Spot](https://github.com/kevinzakka/mink/blob/main/examples/quadruped_spot.py), [Agility Cassie](https://github.com/kevinzakka/mink/blob/main/examples/biped_cassie.py)
+* **Mobile manipulators**: [TidyBot](https://github.com/kevinzakka/mink/blob/main/examples/mobile_tidybot.py), [Hello Robot Stretch](https://github.com/kevinzakka/mink/blob/main/examples/mobile_stretch.py), [Kinova Gen3 + LEAP](https://github.com/kevinzakka/mink/blob/main/examples/mobile_kinova_leap.py)
 
-Check out the [examples](https://github.com/kevinzakka/mink/blob/main/examples/) directory for more code.
+Check out the [examples](https://github.com/kevinzakka/mink/blob/main/examples/) directory for more.
 
 ## How can I help?
 

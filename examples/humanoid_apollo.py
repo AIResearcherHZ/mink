@@ -138,7 +138,7 @@ if __name__ == "__main__":
         for hand, foot in zip(hands, feet):
             mink.move_mocap_to_frame(model, data, f"{foot}_target", foot, "site")
             mink.move_mocap_to_frame(model, data, f"{hand}_target", hand, "site")
-        data.mocap_pos[com_mid] = data.subtree_com[1]
+        data.mocap_pos[com_mid] = data.subtree_com[1]  # Hardcoded index 1.
 
         data.mocap_pos[head_mid] = data.mocap_pos[com_mid] + np.array([1.0, 0.0, 0.5])
 
@@ -158,7 +158,7 @@ if __name__ == "__main__":
 
             # Compute velocity and integrate into the next configuration.
             vel = mink.solve_ik(
-                configuration, tasks, rate.dt, solver, 1e-1, limits=limits
+                configuration, tasks, rate.dt, solver, damping=1e-1, limits=limits
             )
             configuration.integrate_inplace(vel, rate.dt)
             mujoco.mj_camlight(model, data)

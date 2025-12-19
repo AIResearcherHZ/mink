@@ -8,10 +8,7 @@ from loop_rate_limiters import RateLimiter
 import mink
 
 _HERE = Path(__file__).parent
-if mujoco.__version__ == "3.3.0":
-    _XML = _HERE / "hello_robot_stretch_3" / "scene_33.xml"
-else:
-    _XML = _HERE / "hello_robot_stretch_3" / "scene.xml"
+_XML = _HERE / "hello_robot_stretch_3" / "scene_33.xml"
 
 
 if __name__ == "__main__":
@@ -73,7 +70,7 @@ if __name__ == "__main__":
             base_task.set_target(mink.SE3.from_mocap_id(data, mid))
 
             # Compute velocity and integrate into the next configuration.
-            vel = mink.solve_ik(configuration, tasks, rate.dt, solver, 1e-3)
+            vel = mink.solve_ik(configuration, tasks, rate.dt, solver, damping=1e-3)
             configuration.integrate_inplace(vel, rate.dt)
             mujoco.mj_camlight(model, data)
 

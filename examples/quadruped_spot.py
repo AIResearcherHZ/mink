@@ -87,7 +87,7 @@ if __name__ == "__main__":
 
             # Compute velocity and integrate into the next configuration.
             for i in range(max_iters):
-                vel = mink.solve_ik(configuration, tasks, rate.dt, solver, 1e-3)
+                vel = mink.solve_ik(configuration, tasks, rate.dt, solver, damping=1e-3)
                 configuration.integrate_inplace(vel, rate.dt)
 
                 pos_achieved = True

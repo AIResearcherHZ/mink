@@ -113,7 +113,7 @@ if __name__ == "__main__":
                 hand_task.set_target(mink.SE3.from_mocap_id(data, hands_mid[i]))
 
             vel = mink.solve_ik(
-                configuration, tasks, rate.dt, solver, 1e-1, limits=limits
+                configuration, tasks, rate.dt, solver, damping=1e-1, limits=limits
             )
             configuration.integrate_inplace(vel, rate.dt)
             mujoco.mj_camlight(model, data)

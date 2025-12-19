@@ -94,8 +94,6 @@ if __name__ == "__main__":
         mink.move_mocap_to_frame(model, data, "pinch_site_target", "pinch_site", "site")
 
         rate = RateLimiter(frequency=200.0, warn=False)
-        dt = rate.period
-        t = 0.0
         while viewer.is_running():
             # Update task target.
             T_wt = mink.SE3.from_mocap_name(model, data, "pinch_site_target")
@@ -105,18 +103,22 @@ if __name__ == "__main__":
             for i in range(max_iters):
                 if key_callback.fix_base:
                     vel = mink.solve_ik(
-                        configuration, [*tasks, damping_task], rate.dt, solver, 1e-3
+                        configuration,
+                        [*tasks, damping_task],
+                        rate.dt,
+                        solver,
+                        damping=1e-3,
                     )
                 else:
-                    vel = mink.solve_ik(configuration, tasks, rate.dt, solver, 1e-3)
+                    vel = mink.solve_ik(
+                        configuration, tasks, rate.dt, solver, damping=1e-3
+                    )
                 configuration.integrate_inplace(vel, rate.dt)
 
                 # Exit condition.
-                pos_achieved = True
-                ori_achieved = True
                 err = end_effector_task.compute_error(configuration)
-                pos_achieved &= bool(np.linalg.norm(err[:3]) <= pos_threshold)
-                ori_achieved &= bool(np.linalg.norm(err[3:]) <= ori_threshold)
+                pos_achieved = bool(np.linalg.norm(err[:3]) <= pos_threshold)
+                ori_achieved = bool(np.linalg.norm(err[3:]) <= ori_threshold)
                 if pos_achieved and ori_achieved:
                     break
 
@@ -129,4 +131,3 @@ if __name__ == "__main__":
             # Visualize at fixed FPS.
             viewer.sync()
             rate.sleep()
-            t += dt

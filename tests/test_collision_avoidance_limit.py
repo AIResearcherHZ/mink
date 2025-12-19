@@ -77,6 +77,7 @@ class TestCollisionAvoidanceLimit(absltest.TestCase):
         self.assertEqual(limit.max_num_contacts, expected_max_num_contacts)
 
         G, h = limit.compute_qp_inequalities(self.configuration, 1e-3)
+        assert G is not None and h is not None
 
         # The upper bound should always be >= relaxation bound.
         self.assertTrue(np.all(h >= bound_relaxation))
@@ -171,6 +172,7 @@ class TestCollisionAvoidanceLimit(absltest.TestCase):
             bound_relaxation=1e-4,
         )
         G_else, h_else = limit_else.compute_qp_inequalities(cfg, dt)
+        assert G_else is not None and h_else is not None
 
         # All rows that correspond to the active pair should be exactly the relaxation.
         self.assertGreater(h_else.size, 0)
@@ -187,6 +189,7 @@ class TestCollisionAvoidanceLimit(absltest.TestCase):
             gain=0.85,
         )
         G_if, h_if = limit_if.compute_qp_inequalities(cfg, dt)
+        assert G_if is not None and h_if is not None
 
         # h should be strictly larger than relaxation now (gain*dist/dt + relaxation)
         self.assertGreater(h_if.size, 0)

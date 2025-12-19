@@ -109,7 +109,7 @@ if __name__ == "__main__":
                 task.set_target(mink.SE3.from_mocap_id(data, feet_mid[i]))
 
             # Compute velocity, integrate and set control signal.
-            vel = mink.solve_ik(configuration, tasks, rate.dt, solver, 1e-5)
+            vel = mink.solve_ik(configuration, tasks, rate.dt, solver, damping=1e-5)
             configuration.integrate_inplace(vel, rate.dt)
             mujoco.mj_camlight(model, data)
 

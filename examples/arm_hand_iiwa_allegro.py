@@ -30,12 +30,13 @@ def construct_model() -> mujoco.MjModel:
     hand = mujoco.MjSpec.from_file(_HAND_XML.as_posix())
 
     palm = hand.body("palm")
-    palm.quat = (1, 0, 0, 0)
-    palm.pos = (0, 0, 0.095)
+    palm.quat[:] = (1, 0, 0, 0)
+    palm.pos[:] = (0, 0, 0.095)
     site = arm.site("attachment_site")
     arm.attach(hand, prefix="allegro_left/", site=site)
 
-    arm.key("home").delete()
+    home_key = arm.key("home")
+    arm.delete(home_key)
     arm.add_key(name="home", qpos=HOME_QPOS)
 
     for finger in fingers:
@@ -123,28 +124,24 @@ if __name__ == "__main__":
                 )
                 task.set_target(T_pm)
 
+            T_eef = configuration.get_transform_frame_to_world(
+                "attachment_site", "site"
+            )
+            T = T_eef @ T_eef_prev.inverse()
+            T_eef_prev = T_eef.copy()
             for finger in fingers:
-                T_eef = configuration.get_transform_frame_to_world(
-                    "attachment_site", "site"
-                )
-                T = T_eef @ T_eef_prev.inverse()
-                T_w_mocap = mink.SE3.from_mocap_name(model, data, f"{finger}_target")
+                mocap_id = model.body(f"{finger}_target").mocapid[0]
+                T_w_mocap = mink.SE3.from_mocap_id(data, mocap_id)
                 T_w_mocap_new = T @ T_w_mocap
-                data.mocap_pos[model.body(f"{finger}_target").mocapid[0]] = (
-                    T_w_mocap_new.translation()
-                )
-                data.mocap_quat[model.body(f"{finger}_target").mocapid[0]] = (
-                    T_w_mocap_new.rotation().wxyz
-                )
+                data.mocap_pos[mocap_id] = T_w_mocap_new.translation()
+                data.mocap_quat[mocap_id] = T_w_mocap_new.rotation().wxyz
 
             # Compute velocity and integrate into the next configuration.
             vel = mink.solve_ik(
-                configuration, tasks, rate.dt, solver, 1e-3, limits=limits
+                configuration, tasks, rate.dt, solver, damping=1e-3, limits=limits
             )
             configuration.integrate_inplace(vel, rate.dt)
             mujoco.mj_camlight(model, data)
-
-            T_eef_prev = T_eef.copy()
 
             # Visualize at fixed FPS.
             viewer.sync()

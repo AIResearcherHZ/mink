@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Sequence
 
 import mujoco
 import mujoco.viewer
@@ -31,7 +31,7 @@ def compensate_gravity(
     model: mujoco.MjModel,
     data: mujoco.MjData,
     subtree_ids: Sequence[int],
-    qfrc_applied: Optional[np.ndarray] = None,
+    qfrc_applied: np.ndarray | None = None,
 ) -> None:
     """Compute forces to counteract gravity for the given subtrees.
 
@@ -62,7 +62,7 @@ if __name__ == "__main__":
     right_subtree_id = model.body("right/base_link").id
 
     # Get the dof and actuator ids for the joints we wish to control.
-    joint_names: List[str] = []
+    joint_names: list[str] = []
     velocity_limits: dict[str, float] = {}
     for prefix in ["left", "right"]:
         for n in _JOINT_NAMES:

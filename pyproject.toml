@@ -1,59 +1,55 @@
 [build-system]
-requires = ["flit_core >=2,<4"]
-build-backend = "flit_core.buildapi"
+requires = ["uv_build>=0.8.19,<0.9.0"]
+build-backend = "uv_build"
 
 [project]
 name = "mink"
-version = "0.0.13"
-readme = "README.md"
+version = "1.0.0"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = { file = "README.md", content-type = "text/markdown" }
 authors = [
     {name = "Kevin Zakka", email = "zakka@berkeley.edu"},
 ]
-requires-python = ">=3.8"
-dynamic = ["description"]
+keywords = ["inverse", "kinematics", "mujoco"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Framework :: Robot Framework :: Library",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
 ]
+description = "Python inverse kinematics based on MuJoCo"
+requires-python = ">=3.10,<3.14"
 dependencies = [
-    # 3.1.6 for mj_geomDistance.
-    "mujoco >= 3.1.6",
+    "mujoco >= 3.3.6",
     "qpsolvers[daqp] >= 4.3.1",
     "typing_extensions",
-    "numpy",
 ]
-keywords = ["inverse", "kinematics", "mujoco"]
 
-[project.optional-dependencies]
-examples = [
-    "loop-rate-limiters >= 0.1.0",
-    "qpsolvers[daqp] >= 4.3.1",
-    "osqp >=0.6.2,<1",
-]
-test = [
+[dependency-groups]
+dev = [
+    "ipdb>=0.13.13",
+    "pyright>=1.1.407",
+    "pytest>=8.4.2",
     "absl-py",
     "coveralls",
-    "pytest",
-    "robot_descriptions >= 1.9.0",
+    "robot_descriptions>=1.14.0",
+    "ruff>=0.14.3",
+    "ty>=0.0.1a23",
+    "loop-rate-limiters >= 0.1.0",
 ]
-dev = [
-    "black",
-    "mink[test]",
-    "mypy",
-    "ruff",
-]
-all = [
-    "mink[examples,dev]",
+doc = [
+    "sphinx>=7.2.6",
+    "sphinx-favicon",
+    "sphinx-mathjax-offline",
+    "sphinx_rtd_theme>=2.0.0",
+    "toml>=0.10.2",
 ]
 
 [project.urls]
@@ -63,10 +59,11 @@ Changelog = "https://github.com/kevinzakka/mink/blob/main/CHANGELOG.md"
 Homepage = "https://kevinzakka.github.io/mink/"
 Documentation = "https://kevinzakka.github.io/mink/"
 
-[tool.flit.module]
-name = "mink"
-
 [tool.ruff]
+src = ["src"]  # Helpful for recognizing first-party imports.
+exclude = [
+  "typings",
+]
 lint.select = [
     "E",    # pycodestyle errors.
     "F",    # Pyflakes rules.
@@ -91,11 +88,17 @@ lint.ignore = [
     "PLW2901",  # For loop variable overwritten.
 ]
 
-[tool.mypy]
-python_version = "3.12"
-ignore_missing_imports = true
-warn_unused_configs = true
-exclude = ["scripts/"]
+[tool.pyright]
+pythonVersion = "3.10"
+ignore = ["typings", "scripts", "docs"]
+stubPath = "typings"
+
+[tool.ty.environment]
+extra-paths = ["typings"]
+
+[tool.ty.src]
+include = ["src", "tests"]
+exclude = ["typings"]
 
 [tool.coverage.report]
 exclude_also = [

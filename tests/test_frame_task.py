@@ -98,6 +98,7 @@ class TestFrameTask(absltest.TestCase):
         )
         task.set_target_from_configuration(self.configuration)
         pose = self.configuration.get_transform_frame_to_world("pelvis", "body")
+        assert task.transform_target_to_world is not None
         np.testing.assert_array_equal(
             task.transform_target_to_world.translation(), pose.translation()
         )
@@ -116,6 +117,7 @@ class TestFrameTask(absltest.TestCase):
         task.set_target(target)
         y = target.translation()[1]
         target.translation()[1] += 12.0
+        assert task.transform_target_to_world is not None
         self.assertAlmostEqual(task.transform_target_to_world.translation()[1], y)
         self.assertNotAlmostEqual(
             task.transform_target_to_world.translation()[1],

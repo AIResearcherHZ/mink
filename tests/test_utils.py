@@ -41,7 +41,9 @@ class TestUtils(absltest.TestCase):
             left_ankle_pitch_joint=0.2,  # Hinge.
             right_ankle_roll_joint=0.1,  # Slide.
         )
-        q = utils.custom_configuration_vector(self.model, **custom_joints)
+        q = utils.custom_configuration_vector(
+            self.model, key_name=None, **custom_joints
+        )
         q_expected = self.q0.copy()
         for name, value in custom_joints.items():
             qid = self.model.jnt_qposadr[self.model.joint(name).id]

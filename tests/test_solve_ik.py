@@ -116,7 +116,7 @@ class TestSolveIK(absltest.TestCase):
 
         # Initially we are nowhere near the target and moving.
         self.assertFalse(np.allclose(velocity, 0.0))
-        self.assertAlmostEqual(norm(task.compute_error(configuration)), 0.1)
+        self.assertAlmostEqual(float(norm(task.compute_error(configuration))), 0.1)
         with np.testing.assert_raises(AssertionError):
             np.testing.assert_allclose(
                 configuration.get_transform_frame_to_world(
@@ -126,7 +126,8 @@ class TestSolveIK(absltest.TestCase):
             )
 
         last_error = 1e6
-        for nb_steps in range(50):
+        nb_steps = 0
+        for _ in range(50):
             error = norm(task.compute_error(configuration))
             if error < 1e-6 and np.allclose(velocity, 0.0, atol=velocity_tol):
                 break
@@ -136,10 +137,13 @@ class TestSolveIK(absltest.TestCase):
             velocity = mink.solve_ik(
                 configuration, [task], limits=self.limits, dt=dt, solver="daqp"
             )
+            nb_steps += 1
 
         # After nb_steps we are at the target and not moving.
         self.assertTrue(np.allclose(velocity, 0.0, atol=velocity_tol))
-        self.assertAlmostEqual(norm(task.compute_error(configuration)), 0.0, places=5)
+        self.assertAlmostEqual(
+            float(norm(task.compute_error(configuration))), 0.0, places=5
+        )
         np.testing.assert_allclose(
             configuration.get_transform_frame_to_world(
                 "attachment_site", "site"
