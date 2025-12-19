@@ -122,8 +122,8 @@ if __name__ == "__main__":
                 model, data, f"{finger}_target", f"leap_right/{finger}", "site"
             )
 
-        T_eef_prev = configuration.get_transform_frame_to_world(
-            "attachment_site", "site"
+        T_palm_prev = configuration.get_transform_frame_to_world(
+            "leap_right/palm_lower", "body"
         )
 
         rate = RateLimiter(frequency=200.0, warn=False)
@@ -146,11 +146,11 @@ if __name__ == "__main__":
                 )
                 task.set_target(T_pm)
 
-            T_eef = configuration.get_transform_frame_to_world(
-                "attachment_site", "site"
+            T_palm = configuration.get_transform_frame_to_world(
+                "leap_right/palm_lower", "body"
             )
-            T = T_eef @ T_eef_prev.inverse()
-            T_eef_prev = T_eef.copy()
+            T = T_palm @ T_palm_prev.inverse()
+            T_palm_prev = T_palm.copy()
             for finger in fingers:
                 mocap_id = model.body(f"{finger}_target").mocapid[0]
                 T_w_mocap = mink.SE3.from_mocap_id(data, mocap_id)
