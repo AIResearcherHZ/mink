@@ -4,3 +4,9 @@ _static/
 _templates/
 htmlcov/
 *.pyc
+__pycache__/
+*.py[cod]
+*$py.class
+dist/
+build/
+*.egg-info/

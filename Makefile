@@ -35,7 +35,7 @@ doc:
 build:
 	rm -rf dist/
 	uv build
-	uv run --isolated --no-project --with pytest --with robot_descriptions --with dist/*.whl pytest tests/
-	uv run --isolated --no-project --with pytest --with robot_descriptions --with dist/*.tar.gz pytest tests/
+	uv run --no-cache --isolated --no-project --with pytest --with robot_descriptions --with dist/*.whl pytest tests/
+	uv run --no-cache --isolated --no-project --with pytest --with robot_descriptions --with dist/*.tar.gz pytest tests/
 	@ls -lh dist/*.whl | awk '{print "Wheel size: " $$5}'
 	@echo "Build and test successful"
