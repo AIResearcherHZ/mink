@@ -76,6 +76,7 @@
         <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
           mesh="left_hip_pitch_link" />
         <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="left_hip_pitch_link" />
+        <geom name="left_hip_collision" type="sphere" size="0.08" pos="0 0.04 -0.05" contype="0" conaffinity="0" rgba=".6 .2 .6 .2" group="3"/>
 
         <body name="left_hip_roll_link" pos="0.00795 0.0765 -0.04167" quat="0.996195 0 -0.0871557 0">
           <inertial pos="0.0 0.0 -0.055" mass="0.79"
@@ -103,6 +104,7 @@
               <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                 mesh="left_knee_link" />
               <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="left_knee_link" />
+              <geom name="left_shin_collision" type="capsule" size="0.05" fromto="0 0 -0.05 0 0 -0.25" contype="0" conaffinity="0" rgba=".2 .2 .6 .2" group="3"/>
 
               <body name="left_ankle_pitch_link" pos="0.0 0.0227 -0.2985">
                 <inertial pos="0.0 -0.028 0.0" mass="0.23"
@@ -124,6 +126,7 @@
                   <geom size="0.005" pos="-0.05 -0.030 -0.046" rgba="1.0 1.0 1.0 1"/>
                   <geom size="0.005" pos="0.15 0.020 -0.046" rgba="1.0 1.0 1.0 1"/>
                   <geom size="0.005" pos="0.15 -0.034 -0.046" rgba="1.0 1.0 1.0 1"/>
+                  <geom name="left_foot_collision" type="box" size="0.08 0.04 0.02" pos="0.05 0 -0.04" contype="0" conaffinity="0" rgba=".2 .2 .6 .2" group="3"/>
                 </body>
               </body>
             </body>
@@ -139,6 +142,7 @@
         <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
           mesh="right_hip_pitch_link" />
         <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="right_hip_pitch_link" />
+        <geom name="right_hip_collision" type="sphere" size="0.08" pos="0 -0.04 -0.05" contype="0" conaffinity="0" rgba=".6 .2 .6 .2" group="3"/>
 
         <body name="right_hip_roll_link" pos="0.00795 -0.077 -0.04167" quat="0.996195 0 -0.0871557 0">
           <inertial pos="0.0 0.0 -0.055" mass="0.79"
@@ -166,6 +170,7 @@
               <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                 mesh="right_knee_link" />
               <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="right_knee_link" />
+              <geom name="right_shin_collision" type="capsule" size="0.05" fromto="0 0 -0.05 0 0 -0.25" contype="0" conaffinity="0" rgba=".2 .2 .6 .2" group="3"/>
 
               <body name="right_ankle_pitch_link" pos="0.0 -0.0222 -0.2985">
                 <inertial pos="0.0 0.028 0.0" mass="0.23"
@@ -187,6 +192,7 @@
                   <geom size="0.005" pos="-0.05 -0.038 -0.046" rgba="1.0 1.0 1.0 1"/>
                   <geom size="0.005" pos="0.15 0.034 -0.046" rgba="1.0 1.0 1.0 1"/>
                   <geom size="0.005" pos="0.15 -0.020 -0.046" rgba="1.0 1.0 1.0 1"/>
+                  <geom name="right_foot_collision" type="box" size="0.08 0.04 0.02" pos="0.05 0 -0.04" contype="0" conaffinity="0" rgba=".2 .2 .6 .2" group="3"/>
                 </body>
               </body>
             </body>
@@ -221,6 +227,7 @@
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
               mesh="waist_pitch_link" />
             <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="waist_pitch_link" contype="2" conaffinity="1" />
+            <geom name="torso_collision" type="box" size="0.12 0.15 0.15" pos="0 0.03 0.2" contype="0" conaffinity="0" rgba=".6 .2 .2 .2" group="3"/>
 
             <!-- Left Arm -->
             <body name="left_shoulder_pitch_link" pos="0.0 0.13582 0.33654"
@@ -242,6 +249,7 @@
                 <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                   mesh="left_shoulder_roll_link" />
                 <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="left_shoulder_roll_link" />
+                <geom name="left_upper_arm_collision" type="capsule" size="0.04" fromto="0 0 0 -0.03 0 -0.1" contype="0" conaffinity="0" rgba=".2 .6 .6 .2" group="3"/>
 
                 <body name="left_shoulder_yaw_link" pos="-0.034375 0.0 -0.12">
                   <inertial pos="0.000365 -7.2e-05 -0.086229" mass="0.625"
@@ -260,6 +268,7 @@
                     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                       mesh="left_elbow_link" />
                     <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="left_elbow_link" contype="8" conaffinity="1" />
+                    <geom name="left_forearm_collision" type="capsule" size="0.035" fromto="0.02 0 0 0.12 -0.02 0" contype="0" conaffinity="0" rgba=".2 .6 .6 .2" group="3"/>
 
                     <body name="left_wrist_roll_link" pos="0.13 -0.029125 0.0">
                       <inertial pos="0.059349 0.0 0.000843" mass="0.508"
@@ -287,6 +296,7 @@
                           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                             mesh="left_wrist_pitch_link" />
                           <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="left_wrist_pitch_link" contype="8" conaffinity="1" />
+                          <geom name="left_hand_collision" type="sphere" size="0.06" pos="0.1 0 0" contype="0" conaffinity="0" rgba=".2 .6 .2 .2" group="3"/>
                         </body>
                       </body>
                     </body>
@@ -315,6 +325,7 @@
                 <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                   mesh="right_shoulder_roll_link" />
                 <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="right_shoulder_roll_link" />
+                <geom name="right_upper_arm_collision" type="capsule" size="0.04" fromto="0 0 0 -0.03 0 -0.1" contype="0" conaffinity="0" rgba=".2 .6 .6 .2" group="3"/>
 
                 <body name="right_shoulder_yaw_link" pos="-0.027375 0.0 -0.12">
                   <inertial pos="0.000364 6.6e-05 -0.08623" mass="0.625"
@@ -333,6 +344,7 @@
                     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                       mesh="right_elbow_link" />
                     <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="right_elbow_link" contype="16" conaffinity="1" />
+                    <geom name="right_forearm_collision" type="capsule" size="0.035" fromto="0.02 0 0 0.12 -0.02 0" contype="0" conaffinity="0" rgba=".2 .6 .6 .2" group="3"/>
 
                     <body name="right_wrist_roll_link" pos="0.13 -0.027375 0.0">
                       <inertial pos="0.059331 0.0 0.000847" mass="0.508"
@@ -360,6 +372,7 @@
                           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                             mesh="right_wrist_pitch_link" />
                           <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="right_wrist_pitch_link" contype="16" conaffinity="1" />
+                          <geom name="right_hand_collision" type="sphere" size="0.06" pos="0.1 0 0" contype="0" conaffinity="0" rgba=".2 .6 .2 .2" group="3"/>
                         </body>
                       </body>
                     </body>
@@ -395,6 +408,7 @@
                   <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                     mesh="neck_pitch_link" />
                   <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="neck_pitch_link" contype="4" conaffinity="1" />
+                  <geom name="head_collision" type="sphere" size="0.1" pos="0.02 0 0.1" contype="0" conaffinity="0" rgba=".8 .6 .2 .2" group="3"/>
                 </body>
               </body>
             </body>
