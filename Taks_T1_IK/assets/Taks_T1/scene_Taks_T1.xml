@@ -20,29 +20,29 @@
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
     
-    <!-- Mocap targets for IK (5 targets) -->
+    <!-- Mocap targets for IK (5 targets) - 位置与keyframe stand初始姿态一致 -->
     <!-- Left hand target -->
-    <body name="left_hand_target" pos="0.3 0.3 0.9" mocap="true">
+    <body name="left_hand_target" pos="0.2210 0.3968 0.9006" mocap="true">
       <geom type="sphere" size=".04" contype="0" conaffinity="0" rgba=".8 .2 .2 .5"/>
       <site type="sphere" size="0.01" rgba="1 0 0 1" group="1"/>
     </body>
     <!-- Right hand target -->
-    <body name="right_hand_target" pos="0.3 -0.3 0.9" mocap="true">
+    <body name="right_hand_target" pos="0.2210 -0.3967 0.9006" mocap="true">
       <geom type="sphere" size=".04" contype="0" conaffinity="0" rgba=".2 .8 .2 .5"/>
       <site type="sphere" size="0.01" rgba="0 1 0 1" group="1"/>
     </body>
     <!-- Left foot target -->
-    <body name="left_foot_target" pos="0 0.1 0.05" mocap="true">
+    <body name="left_foot_target" pos="0.0164 0.1671 0.0437" mocap="true">
       <geom type="box" size=".04 .04 .02" contype="0" conaffinity="0" rgba=".8 .5 .2 .5"/>
       <site type="sphere" size="0.01" rgba="1 0.5 0 1" group="1"/>
     </body>
     <!-- Right foot target -->
-    <body name="right_foot_target" pos="0 -0.1 0.05" mocap="true">
+    <body name="right_foot_target" pos="0.0164 -0.1670 0.0437" mocap="true">
       <geom type="box" size=".04 .04 .02" contype="0" conaffinity="0" rgba=".2 .5 .8 .5"/>
       <site type="sphere" size="0.01" rgba="0 0.5 1 1" group="1"/>
     </body>
     <!-- Neck target -->
-    <body name="neck_target" pos="0 0 1.2" mocap="true">
+    <body name="neck_target" pos="0.0000 0.0210 1.3233" mocap="true">
       <geom type="sphere" size=".03" contype="0" conaffinity="0" rgba=".8 .8 .2 .5"/>
       <site type="sphere" size="0.01" rgba="1 1 0 1" group="1"/>
     </body>
