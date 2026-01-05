@@ -269,6 +269,7 @@
                       mesh="left_elbow_link" />
                     <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="left_elbow_link" contype="8" conaffinity="1" />
                     <geom name="left_forearm_collision" type="capsule" size="0.035" fromto="0.02 0 0 0.12 -0.02 0" contype="0" conaffinity="0" rgba=".2 .6 .6 .2" group="3"/>
+                    <geom name="left_elbow_collision" type="sphere" size="0.045" pos="0 0 0" contype="0" conaffinity="0" rgba=".6 .2 .6 .2" group="3"/>
 
                     <body name="left_wrist_roll_link" pos="0.13 -0.029125 0.0">
                       <inertial pos="0.059365 -0.000127 0.000856" quat="0.709390 0.704504 -0.014627 0.015066" mass="0.508"
@@ -345,6 +346,7 @@
                       mesh="right_elbow_link" />
                     <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="right_elbow_link" contype="16" conaffinity="1" />
                     <geom name="right_forearm_collision" type="capsule" size="0.035" fromto="0.02 0 0 0.12 -0.02 0" contype="0" conaffinity="0" rgba=".2 .6 .6 .2" group="3"/>
+                    <geom name="right_elbow_collision" type="sphere" size="0.045" pos="0 0 0" contype="0" conaffinity="0" rgba=".6 .2 .6 .2" group="3"/>
 
                     <body name="right_wrist_roll_link" pos="0.13 -0.027375 0.0">
                       <inertial pos="0.059348 -0.000124 0.000828" quat="0.709304 0.704564 -0.015028 0.015864" mass="0.508"
