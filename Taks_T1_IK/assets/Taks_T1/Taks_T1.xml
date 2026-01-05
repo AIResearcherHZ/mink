@@ -63,6 +63,7 @@
       <site name="imu" size="0.01" pos="0.0 0.0 0.0" />
       <inertial pos="-0.000276 0.004540 -0.078485" quat="-0.483309 0.519158 0.510148 -0.486453" mass="3.34"
         diaginertia="0.00671618 0.0161253 0.0176076" />
+      <joint name="floating_base_joint" type="free" limited="false" actuatorfrclimited="false" />
       <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
         mesh="pelvis" />
       <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="pelvis" contype="2" conaffinity="1" />
