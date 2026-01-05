@@ -45,12 +45,6 @@ COLLISION_PAIRS = [
     (["head_collision"], ["left_forearm_collision", "right_forearm_collision"]),
 ]
 
-RESET_INTERP_STEPS = 50
-
-
-def interpolate_full_reset(current_q, target_q, steps=RESET_INTERP_STEPS):
-    """全身从当前位置插值到目标位置"""
-    return [current_q + (i / steps) * (target_q - current_q) for i in range(1, steps + 1)]
 
 
 if __name__ == "__main__":
@@ -89,38 +83,13 @@ if __name__ == "__main__":
         
         prev_pos = {name: data.mocap_pos[mid].copy() for name, mid in mocap_ids.items()}
         prev_quat = {name: data.mocap_quat[mid].copy() for name, mid in mocap_ids.items()}
-        prev_q, reset_queue, print_counter = None, [], 0
+        print_counter = 0
         threshold_sq, quat_threshold = 1e-6, 0.01
-        POS_JUMP_THRESHOLD = 0.5
         
         rate = RateLimiter(frequency=200.0, warn=False)
         dt = rate.dt
         
         while viewer.is_running():
-            # 检测退格键触发全局reset
-            if prev_q is not None and not reset_queue:
-                if np.sum(np.abs(cfg.q - prev_q) > POS_JUMP_THRESHOLD) > 3:
-                    print(f"[INFO] 检测到全局reset，执行平滑reset")
-                    reset_queue = interpolate_full_reset(prev_q.copy(), reset_target_q)
-                    prev_q = None
-                    continue
-            
-            # reset插值处理
-            if reset_queue:
-                cfg.update(reset_queue.pop(0))
-                for name, (link, mocap, _) in END_EFFECTORS.items():
-                    mink.move_mocap_to_frame(model, data, mocap, link, "body")
-                    ee_tasks[name].set_target_from_configuration(cfg)
-                    mid = model.body(mocap).mocapid[0]
-                    prev_pos[name] = data.mocap_pos[mid].copy()
-                    prev_quat[name] = data.mocap_quat[mid].copy()
-                mujoco.mj_forward(model, data)
-                data.qfrc_applied[:] = data.qfrc_bias[:]
-                mujoco.mj_camlight(model, data)
-                viewer.sync()
-                rate.sleep()
-                continue
-            
             # 检测移动的mocap并设置任务目标（同时检测位置和姿态）
             active_limbs = []
             for name, mid in mocap_ids.items():
@@ -166,7 +135,6 @@ if __name__ == "__main__":
                         mask[idx] = True
                 vel[~mask] = 0.0
             
-            prev_q = cfg.q.copy()
             cfg.integrate_inplace(vel, dt)
             
             # 重力补偿前馈
