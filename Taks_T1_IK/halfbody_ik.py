@@ -30,20 +30,14 @@ END_EFFECTORS = {
 COLLISION_PAIRS = [
     (["left_hand_collision"], ["torso_collision"]),
     (["right_hand_collision"], ["torso_collision"]),
-    (["left_forearm_collision"], ["torso_collision"]),
-    (["right_forearm_collision"], ["torso_collision"]),
-    (["left_upper_arm_collision"], ["torso_collision"]),
-    (["right_upper_arm_collision"], ["torso_collision"]),
     (["left_elbow_collision"], ["torso_collision"]),
     (["right_elbow_collision"], ["torso_collision"]),
     (["left_hand_collision"], ["right_hand_collision"]),
-    (["left_forearm_collision"], ["right_forearm_collision"]),
-    (["left_upper_arm_collision"], ["right_upper_arm_collision"]),
     (["left_elbow_collision"], ["right_elbow_collision"]),
     (["head_collision"], ["left_hand_collision", "right_hand_collision"]),
-    (["head_collision"], ["left_forearm_collision", "right_forearm_collision"]),
-    (["left_hand_collision"], ["right_forearm_collision"]),
-    (["right_hand_collision"], ["left_forearm_collision"]),
+    (["head_collision"], ["left_elbow_collision", "right_elbow_collision"]),
+    (["left_hand_collision"], ["right_elbow_collision"]),
+    (["right_hand_collision"], ["left_elbow_collision"]),
 ]
 
 # 全局状态

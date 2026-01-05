@@ -77,7 +77,7 @@
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
               mesh="waist_pitch_link" />
             <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="waist_pitch_link" contype="2" conaffinity="1" />
-            <geom name="torso_collision" type="box" size="0.12 0.15 0.15" pos="0 0.03 0.2" contype="0" conaffinity="0" rgba=".6 .2 .2 .2" group="3"/>
+            <geom name="torso_collision" type="box" size="0.12 0.15 0.15" pos="0 0.03 0.2" contype="1" conaffinity="1" rgba=".6 .2 .2 .2" group="3"/>
 
             <!-- Left Arm -->
             <body name="left_shoulder_pitch_link" pos="0.0 0.13582 0.33654"
@@ -99,7 +99,6 @@
                 <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                   mesh="left_shoulder_roll_link" />
                 <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="left_shoulder_roll_link" />
-                <geom name="left_upper_arm_collision" type="capsule" size="0.04" fromto="0 0 0 -0.03 0 -0.1" contype="0" conaffinity="0" rgba=".2 .6 .6 .2" group="3"/>
 
                 <body name="left_shoulder_yaw_link" pos="-0.034375 0.0 -0.12">
                   <inertial pos="0.000352 -0.000067 -0.086391" quat="-0.705828 -0.040991 0.706119 -0.039023" mass="0.625"
@@ -118,8 +117,7 @@
                     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                       mesh="left_elbow_link" />
                     <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="left_elbow_link" contype="8" conaffinity="1" />
-                    <geom name="left_forearm_collision" type="capsule" size="0.035" fromto="0.02 0 0 0.12 -0.02 0" contype="0" conaffinity="0" rgba=".2 .6 .6 .2" group="3"/>
-                    <geom name="left_elbow_collision" type="sphere" size="0.045" pos="0 0 0" contype="0" conaffinity="0" rgba=".6 .2 .6 .2" group="3"/>
+                    <geom name="left_elbow_collision" type="sphere" size="0.05" pos="0 -0.025 0" contype="1" conaffinity="1" rgba=".6 .2 .6 .2" group="3"/>
 
                     <body name="left_wrist_roll_link" pos="0.13 -0.029125 0.0">
                       <inertial pos="0.059365 -0.000127 0.000856" quat="0.709390 0.704504 -0.014627 0.015066" mass="0.508"
@@ -147,7 +145,7 @@
                           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                             mesh="left_wrist_pitch_link" />
                           <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="left_wrist_pitch_link" contype="8" conaffinity="1" />
-                          <geom name="left_hand_collision" type="sphere" size="0.1" pos="0.12 -0.02 0" contype="0" conaffinity="0" rgba=".2 .6 .2 .2" group="3"/>
+                          <geom name="left_hand_collision" type="sphere" size="0.1" pos="0.12 -0.02 0" contype="1" conaffinity="1" rgba=".2 .6 .2 .2" group="3"/>
                           <site name="left_hand" size="0.01" pos="0.15 0 0" />
                         </body>
                       </body>
@@ -177,7 +175,6 @@
                 <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                   mesh="right_shoulder_roll_link" />
                 <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="right_shoulder_roll_link" />
-                <geom name="right_upper_arm_collision" type="capsule" size="0.04" fromto="0 0 0 -0.03 0 -0.1" contype="0" conaffinity="0" rgba=".2 .6 .6 .2" group="3"/>
 
                 <body name="right_shoulder_yaw_link" pos="-0.027375 0.0 -0.12">
                   <inertial pos="0.000351 0.000061 -0.086330" quat="0.706146 0.036788 -0.706063 0.038462" mass="0.625"
@@ -196,8 +193,7 @@
                     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                       mesh="right_elbow_link" />
                     <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="right_elbow_link" contype="16" conaffinity="1" />
-                    <geom name="right_forearm_collision" type="capsule" size="0.035" fromto="0.02 0 0 0.12 -0.02 0" contype="0" conaffinity="0" rgba=".2 .6 .6 .2" group="3"/>
-                    <geom name="right_elbow_collision" type="sphere" size="0.045" pos="0 0 0" contype="0" conaffinity="0" rgba=".6 .2 .6 .2" group="3"/>
+                    <geom name="right_elbow_collision" type="sphere" size="0.05" pos="0 -0.025 0" contype="1" conaffinity="1" rgba=".6 .2 .6 .2" group="3"/>
 
                     <body name="right_wrist_roll_link" pos="0.13 -0.027375 0.0">
                       <inertial pos="0.059348 -0.000124 0.000828" quat="0.709304 0.704564 -0.015028 0.015864" mass="0.508"
@@ -225,7 +221,7 @@
                           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                             mesh="right_wrist_pitch_link" />
                           <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="right_wrist_pitch_link" contype="16" conaffinity="1" />
-                          <geom name="right_hand_collision" type="sphere" size="0.1" pos="0.12 0.02 0" contype="0" conaffinity="0" rgba=".2 .6 .2 .2" group="3"/>
+                          <geom name="right_hand_collision" type="sphere" size="0.1" pos="0.12 0.02 0" contype="1" conaffinity="1" rgba=".2 .6 .2 .2" group="3"/>
                           <site name="right_hand" size="0.01" pos="0.15 0 0" />
                         </body>
                       </body>
@@ -263,7 +259,7 @@
                   <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="1.0 1.0 1.0 1"
                     mesh="neck_pitch_link" />
                   <geom type="mesh" rgba="1.0 1.0 1.0 1" mesh="neck_pitch_link" contype="4" conaffinity="1" />
-                  <geom name="head_collision" type="sphere" size="0.12" pos="0.0 -0.02 0.1" contype="0" conaffinity="0" rgba=".8 .6 .2 .2" group="3"/>
+                  <geom name="head_collision" type="sphere" size="0.12" pos="0.0 -0.02 0.1" contype="1" conaffinity="1" rgba=".8 .6 .2 .2" group="3"/>
                   <site name="neck_pitch" size="0.01" pos="0 0 0.1" />
                 </body>
               </body>
