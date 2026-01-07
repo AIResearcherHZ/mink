@@ -1,4 +1,4 @@
-"""半身独立肢体IK控制 v2 - 重构版本"""
+"""半身独立肢体IK控制"""
 
 from pathlib import Path
 import numpy as np
@@ -251,14 +251,19 @@ if __name__ == "__main__":
             
             cfg.integrate_inplace(vel, dt)
             
-            # 重力补偿
+            # 前馈扭矩补偿
             mujoco.mj_forward(model, data)
             data.qfrc_applied[:] = data.qfrc_bias[:]
             
             print_counter += 1
             if print_counter >= 200:
                 print_counter = 0
-                print(f"[Gravity Compensation] :\n  {np.array2string(data.qfrc_applied[6:], precision=3, suppress_small=True)}")
+                print(f"[Compensation] :\n  {np.array2string(data.qfrc_applied[6:], precision=3, suppress_small=True)}")
+                print("\n[Mocap状态]:")
+                for name, mid in mocap_ids.items():
+                    pos = data.mocap_pos[mid]
+                    quat = data.mocap_quat[mid]
+                    print(f"  {name}: pos={np.array2string(pos, precision=3, suppress_small=True)}, quat={np.array2string(quat, precision=3, suppress_small=True)}")
             
             mujoco.mj_camlight(model, data)
             viewer.sync()
