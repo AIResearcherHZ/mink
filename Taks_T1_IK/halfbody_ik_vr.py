@@ -103,23 +103,24 @@ if __name__ == "__main__":
     # 创建任务(固定cost，不动态调整)
     tasks = [
         mink.FrameTask("base_link", "body", position_cost=1e6, orientation_cost=1e6),  # 固定base_link
-        mink.PostureTask(model, cost=1e-3),  # 低优先级posture正则化
+        mink.PostureTask(model, cost=1e-2),  # posture正则化
     ]
     for name, (link, _, _) in END_EFFECTORS.items():
-        cost = (0.0, 5.0) if name == "waist" else (5.0, 5.0)
+        cost = (0.0, 2.0) if name == "waist" else (2.0, 2.0)  # 降低cost减少超范围抖动
         tasks.append(mink.FrameTask(link, "body", position_cost=cost[0], orientation_cost=cost[1]))
-    neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=3.0)
+    neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=1.0)
     tasks.append(neck_task)
     ee_tasks = {name: tasks[i+2] for i, name in enumerate(END_EFFECTORS.keys())}
     
     limits = [
         mink.ConfigurationLimit(model),
+        mink.VelocityLimit(model),  # 限制关节速度，防止超范围抖动
         mink.CollisionAvoidanceLimit(model, COLLISION_PAIRS, gain=0.5, 
                                      minimum_distance_from_collisions=0.02, 
                                      collision_detection_distance=0.1)
     ]
     
-    # VR接收器(已内置EMA平滑+跳变过滤)
+    # VR接收器
     vr = VRReceiver()
     vr.start()
     
@@ -231,7 +232,7 @@ if __name__ == "__main__":
                 cfg.integrate_inplace(vel, dt)
                 if alpha >= 1.0:
                     reset["active"] = False
-                    tasks[1].cost[:] = 1e-3  # 恢复posture cost
+                    tasks[1].cost[:] = 1e-2  # 恢复posture cost
                     print("[Reset] 复位完成")
                 mujoco.mj_forward(model, data)
                 data.qfrc_applied[:] = data.qfrc_bias[:]
@@ -265,8 +266,8 @@ if __name__ == "__main__":
             if frozen_dofs:
                 constraints.append(mink.DofFreezingTask(model, dof_indices=frozen_dofs))
             
-            # 求解IK(使用equality constraint冻结非活动关节)
-            vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=1e-3, limits=limits, constraints=constraints)
+            # 求解IK(damping提高奇异点稳定性)
+            vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=1e-1, limits=limits, constraints=constraints)
             cfg.integrate_inplace(vel, dt)
             
             # 前馈扭矩补偿
