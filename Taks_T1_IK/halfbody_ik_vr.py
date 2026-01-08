@@ -1,4 +1,7 @@
-"""半身VR控制IK"""
+"""半身VR控制IK - 稳定版
+
+解决多路IK跳变: 使用DofFreezingTask作为equality constraint冻结非活动关节
+"""
 
 import sys
 from pathlib import Path
@@ -23,7 +26,7 @@ JOINT_GROUPS = {
     "neck": ["neck_yaw_joint", "neck_roll_joint", "neck_pitch_joint"],
 }
 
-# 末端执行器
+# 末端执行器: (link, mocap, limbs)
 END_EFFECTORS = {
     "left_hand": ("left_wrist_pitch_link", "left_hand_target", ["left_arm"]),
     "right_hand": ("right_wrist_pitch_link", "right_hand_target", ["right_arm"]),
@@ -44,31 +47,18 @@ COLLISION_PAIRS = [
     (["right_hand_collision"], ["left_elbow_collision"]),
 ]
 
-# 速度限制参数(过滤抖动)
-MAX_VEL = 100.0  # rad/s
 
-# 动作EMA平滑参数
-# alpha越大响应越快，越小越平滑但有延迟
-# 0.3-0.5: 较平滑, 0.6-0.8: 快速响应, 1.0: 无平滑
-ACTION_EMA_ALPHA = 0.8
-
-# 全局状态
-reset_state = {"active": False, "alpha": 0.0, "start_pos": {}, "start_quat": {}, "start_q": None}
-
-
-def slerp(q0: np.ndarray, q1: np.ndarray, alpha: float) -> np.ndarray:
+def slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
     """四元数球面插值"""
-    q0, q1 = q0.copy(), q1.copy()
     dot = np.dot(q0, q1)
     if dot < 0:
-        q1 = -q1
-        dot = -dot
+        q1, dot = -q1, -dot
     if dot > 0.9995:
-        result = (1 - alpha) * q0 + alpha * q1
+        r = (1 - t) * q0 + t * q1
     else:
         theta = np.arccos(np.clip(dot, -1, 1))
-        result = (np.sin((1-alpha)*theta)*q0 + np.sin(alpha*theta)*q1) / np.sin(theta)
-    return result / np.linalg.norm(result)
+        r = (np.sin((1 - t) * theta) * q0 + np.sin(t * theta) * q1) / np.sin(theta)
+    return r / np.linalg.norm(r)
 
 
 def compute_lookat_quat(head_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
@@ -77,7 +67,7 @@ def compute_lookat_quat(head_pos: np.ndarray, target_pos: np.ndarray) -> np.ndar
     dist = np.linalg.norm(direction)
     if dist < 1e-6:
         return np.array([1.0, 0.0, 0.0, 0.0])
-    direction = direction / dist
+    direction /= dist
     forward = np.array([1.0, 0.0, 0.0])
     dot = np.clip(np.dot(forward, direction), -1.0, 1.0)
     if dot > 0.9999:
@@ -85,7 +75,7 @@ def compute_lookat_quat(head_pos: np.ndarray, target_pos: np.ndarray) -> np.ndar
     if dot < -0.9999:
         return np.array([0.0, 0.0, 0.0, 1.0])
     axis = np.cross(forward, direction)
-    axis = axis / np.linalg.norm(axis)
+    axis /= np.linalg.norm(axis)
     angle = np.arccos(dot)
     w = np.cos(angle / 2)
     xyz = axis * np.sin(angle / 2)
@@ -97,30 +87,31 @@ if __name__ == "__main__":
     cfg = mink.Configuration(model)
     model, data = cfg.model, cfg.data
     
-    # 预计算索引
+    # 预计算DOF索引
     joint_idx = {k: [model.jnt_dofadr[model.joint(j).id] for j in v] for k, v in JOINT_GROUPS.items()}
+    # 所有可控DOF索引(排除floating base)
+    all_dof_indices = []
+    for limb in JOINT_GROUPS:
+        all_dof_indices.extend(joint_idx[limb])
+    all_dof_indices = sorted(set(all_dof_indices))
+    
     mocap_ids = {name: model.body(mocap).mocapid[0] for name, (_, mocap, _) in END_EFFECTORS.items()}
     ee_limbs = {name: limbs for name, (_, _, limbs) in END_EFFECTORS.items()}
     neck_pitch_mid = model.body("neck_pitch_target").mocapid[0]
+    left_hand_mid, right_hand_mid, waist_mid = mocap_ids["left_hand"], mocap_ids["right_hand"], mocap_ids["waist"]
     
-    # 创建任务
+    # 创建任务(固定cost，不动态调整)
     tasks = [
-        mink.FrameTask("base_link", "body", position_cost=0.0, orientation_cost=0.0),
-        mink.PostureTask(model, cost=1e-2),
+        mink.FrameTask("base_link", "body", position_cost=1e6, orientation_cost=1e6),  # 固定base_link
+        mink.PostureTask(model, cost=1e-3),  # 低优先级posture正则化
     ]
     for name, (link, _, _) in END_EFFECTORS.items():
-        if name == "waist":
-            tasks.append(mink.FrameTask(link, "body", position_cost=0.0, orientation_cost=5.0))
-        else:
-            tasks.append(mink.FrameTask(link, "body", position_cost=5.0, orientation_cost=5.0))
-    neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=5.0)
+        cost = (0.0, 5.0) if name == "waist" else (5.0, 5.0)
+        tasks.append(mink.FrameTask(link, "body", position_cost=cost[0], orientation_cost=cost[1]))
+    neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=3.0)
     tasks.append(neck_task)
-    # 手肘向下约束（低权重，只约束Z方向位置）
-    left_elbow_task = mink.FrameTask("left_elbow_link", "body", position_cost=[0.0, 0.0, 0.5], orientation_cost=0.0)
-    right_elbow_task = mink.FrameTask("right_elbow_link", "body", position_cost=[0.0, 0.0, 0.5], orientation_cost=0.0)
-    tasks.extend([left_elbow_task, right_elbow_task])
-    
     ee_tasks = {name: tasks[i+2] for i, name in enumerate(END_EFFECTORS.keys())}
+    
     limits = [
         mink.ConfigurationLimit(model),
         mink.CollisionAvoidanceLimit(model, COLLISION_PAIRS, gain=0.5, 
@@ -128,45 +119,44 @@ if __name__ == "__main__":
                                      collision_detection_distance=0.1)
     ]
     
-    # VR接收器
+    # VR接收器(已内置EMA平滑+跳变过滤)
     vr = VRReceiver()
     vr.start()
     
-    # VR校准状态: 包含手部偏移和头部到neck_yaw_link的偏移
-    vr_state = {
-        "calibrated": False,
-        "left_offset": np.zeros(3),
-        "right_offset": np.zeros(3),
-        "head_to_waist": np.zeros(3),
-    }
+    # VR校准状态
+    vr_calib = {"done": False, "left": np.zeros(3), "right": np.zeros(3), "head": np.zeros(3)}
+    # 复位状态
+    reset = {"active": False, "alpha": 0.0, "start_q": None, "start_pos": {}, "start_quat": {}}
+    
+    def do_calibrate():
+        """执行VR校准"""
+        vr_data = vr.data
+        if not vr_data.tracking_enabled:
+            print("[VR] 未启用追踪，无法校准")
+            return
+        vr_calib["left"] = data.mocap_pos[left_hand_mid] - vr_data.left_hand.position
+        vr_calib["right"] = data.mocap_pos[right_hand_mid] - vr_data.right_hand.position
+        vr_calib["head"] = data.mocap_pos[waist_mid] - vr_data.head.position
+        vr_calib["done"] = True
+        vr.reset_smooth()  # 重置VR接收器平滑状态
+        print(f"[VR] 校准完成: L={vr_calib['left']}, R={vr_calib['right']}")
+    
+    def do_reset():
+        """开始复位"""
+        reset["active"] = True
+        reset["alpha"] = 0.0
+        reset["start_q"] = cfg.q.copy()
+        for name, mid in mocap_ids.items():
+            reset["start_pos"][name] = data.mocap_pos[mid].copy()
+            reset["start_quat"][name] = data.mocap_quat[mid].copy()
+        vr.reset_smooth()
+        print("[Reset] 复位开始...")
     
     def key_callback(keycode: int) -> None:
-        if keycode == 259:  # BACKSPACE: 复位
-            reset_state["active"] = True
-            reset_state["alpha"] = 0.0
-            reset_state["start_q"] = cfg.q.copy()
-            for name, mid in mocap_ids.items():
-                reset_state["start_pos"][name] = data.mocap_pos[mid].copy()
-                reset_state["start_quat"][name] = data.mocap_quat[mid].copy()
-            print("[Reset] 全局复位开始...")
-        elif keycode == 67:  # C: VR校准
-            vr_data = vr.data
-            if vr_data.tracking_enabled:
-                # 手部偏移: MuJoCo mocap位置 - VR手部位置
-                left_mocap = data.mocap_pos[mocap_ids["left_hand"]]
-                right_mocap = data.mocap_pos[mocap_ids["right_hand"]]
-                vr_state["left_offset"] = left_mocap - vr_data.left_hand.position
-                vr_state["right_offset"] = right_mocap - vr_data.right_hand.position
-                # 头部到neck_yaw_link偏移: MuJoCo waist目标位置 - VR头部位置
-                waist_pos = data.mocap_pos[mocap_ids["waist"]]
-                vr_state["head_to_waist"] = waist_pos - vr_data.head.position
-                vr_state["calibrated"] = True
-                print(f"[VR] 校准完成:")
-                print(f"  L={vr_state['left_offset']}")
-                print(f"  R={vr_state['right_offset']}")
-                print(f"  Head->Waist={vr_state['head_to_waist']}")
-            else:
-                print("[VR] 未启用追踪，无法校准")
+        if keycode == 259:  # BACKSPACE
+            do_reset()
+        elif keycode == 67:  # C
+            do_calibrate()
     
     with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False, 
                                        key_callback=key_callback) as viewer:
@@ -181,92 +171,57 @@ if __name__ == "__main__":
             ee_tasks[name].set_target_from_configuration(cfg)
         mink.move_mocap_to_frame(model, data, "neck_pitch_target", "neck_pitch_link", "body")
         neck_task.set_target_from_configuration(cfg)
-        # 初始化手肘向下约束目标（保持当前位置，但Z方向会被约束向下）
-        left_elbow_task.set_target_from_configuration(cfg)
-        right_elbow_task.set_target_from_configuration(cfg)
         
-        # 保存初始位置
+        # 保存初始状态
         init_q = cfg.q.copy()
-        init_mocap_pos = {name: data.mocap_pos[mid].copy() for name, mid in mocap_ids.items()}
-        init_mocap_quat = {name: data.mocap_quat[mid].copy() for name, mid in mocap_ids.items()}
-        
-        prev_pos = {name: data.mocap_pos[mid].copy() for name, mid in mocap_ids.items()}
-        prev_quat = {name: data.mocap_quat[mid].copy() for name, mid in mocap_ids.items()}
-        print_counter = 0
-        threshold_sq = 1e-6
-        quat_threshold = 0.01
-        reset_duration = 1.5
-        
-        left_hand_mid = mocap_ids["left_hand"]
-        right_hand_mid = mocap_ids["right_hand"]
+        init_pos = {name: data.mocap_pos[mid].copy() for name, mid in mocap_ids.items()}
+        init_quat = {name: data.mocap_quat[mid].copy() for name, mid in mocap_ids.items()}
+        prev_pos = {name: pos.copy() for name, pos in init_pos.items()}
+        prev_quat = {name: quat.copy() for name, quat in init_quat.items()}
         
         rate = RateLimiter(frequency=200.0, warn=False)
         dt = rate.dt
-        filtered_vel = np.zeros(model.nv)  # EMA平滑状态
+        reset_duration = 1.5
+        print_counter = 0
         
         print("[Info] 键盘: C=校准, Backspace=复位 | VR手柄: B双击=校准, A双击=复位")
         
         while viewer.is_running():
-            # 获取VR数据并更新mocap
             vr_data = vr.data
             
-            # 检测 VR按键双击事件: B双击=校准, A双击=复位
-            if vr_data.button_events.right_b:  # B双击: 校准
-                if vr_data.tracking_enabled:
-                    left_mocap = data.mocap_pos[mocap_ids["left_hand"]]
-                    right_mocap = data.mocap_pos[mocap_ids["right_hand"]]
-                    vr_state["left_offset"] = left_mocap - vr_data.left_hand.position
-                    vr_state["right_offset"] = right_mocap - vr_data.right_hand.position
-                    waist_pos = data.mocap_pos[mocap_ids["waist"]]
-                    vr_state["head_to_waist"] = waist_pos - vr_data.head.position
-                    vr_state["calibrated"] = True
-                    print(f"[VR] B双击校准完成: L={vr_state['left_offset']}, R={vr_state['right_offset']}")
-                else:
-                    print("[VR] 未启用追踪，无法校准")
+            # VR按键事件
+            if vr_data.button_events.right_b:
+                do_calibrate()
+            if vr_data.button_events.right_a:
+                do_reset()
             
-            if vr_data.button_events.right_a:  # A双击: 复位
-                reset_state["active"] = True
-                reset_state["alpha"] = 0.0
-                reset_state["start_q"] = cfg.q.copy()
-                for name, mid in mocap_ids.items():
-                    reset_state["start_pos"][name] = data.mocap_pos[mid].copy()
-                    reset_state["start_quat"][name] = data.mocap_quat[mid].copy()
-                print("[VR] A双击复位开始...")
-            
-            if vr_state["calibrated"] and vr_data.tracking_enabled:
-                # 手部位置 = VR手部 + 偏移
-                data.mocap_pos[left_hand_mid] = vr_data.left_hand.position + vr_state["left_offset"]
+            # VR数据更新mocap(已由VR接收器平滑)
+            if vr_calib["done"] and vr_data.tracking_enabled:
+                data.mocap_pos[left_hand_mid] = vr_data.left_hand.position + vr_calib["left"]
                 data.mocap_quat[left_hand_mid] = vr_data.left_hand.quaternion
-                data.mocap_pos[right_hand_mid] = vr_data.right_hand.position + vr_state["right_offset"]
+                data.mocap_pos[right_hand_mid] = vr_data.right_hand.position + vr_calib["right"]
                 data.mocap_quat[right_hand_mid] = vr_data.right_hand.quaternion
-                # waist(neck_yaw_link): 位置 = VR头部 + 偏移, 姿态 = VR头部姿态
-                waist_mid = mocap_ids["waist"]
-                data.mocap_pos[waist_mid] = vr_data.head.position + vr_state["head_to_waist"]
+                data.mocap_pos[waist_mid] = vr_data.head.position + vr_calib["head"]
                 data.mocap_quat[waist_mid] = vr_data.head.quaternion
             
             # look-at目标
             hands_center = (data.mocap_pos[left_hand_mid] + data.mocap_pos[right_hand_mid]) / 2.0
             head_pos = data.xpos[model.body("neck_pitch_link").id]
-            lookat_quat = compute_lookat_quat(head_pos, hands_center)
-            data.mocap_quat[neck_pitch_mid] = lookat_quat
+            data.mocap_quat[neck_pitch_mid] = compute_lookat_quat(head_pos, hands_center)
             neck_task.set_target(mink.SE3.from_mocap_id(data, neck_pitch_mid))
             
-            # 处理reset
-            if reset_state["active"]:
-                reset_state["alpha"] += dt / reset_duration
-                alpha = min(1.0, reset_state["alpha"])
-                
+            # 复位处理
+            if reset["active"]:
+                reset["alpha"] += dt / reset_duration
+                alpha = min(1.0, reset["alpha"])
                 for name, mid in mocap_ids.items():
-                    data.mocap_pos[mid] = (1 - alpha) * reset_state["start_pos"][name] + alpha * init_mocap_pos[name]
-                    data.mocap_quat[mid] = slerp(reset_state["start_quat"][name], init_mocap_quat[name], alpha)
-                    prev_pos[name] = data.mocap_pos[mid].copy()
-                    prev_quat[name] = data.mocap_quat[mid].copy()
-                
-                cfg.update(reset_state["start_q"] * (1 - alpha) + init_q * alpha)
+                    data.mocap_pos[mid] = (1 - alpha) * reset["start_pos"][name] + alpha * init_pos[name]
+                    data.mocap_quat[mid] = slerp(reset["start_quat"][name], init_quat[name], alpha)
+                    prev_pos[name], prev_quat[name] = data.mocap_pos[mid].copy(), data.mocap_quat[mid].copy()
+                cfg.update(reset["start_q"] * (1 - alpha) + init_q * alpha)
                 for name in END_EFFECTORS:
                     ee_tasks[name].set_target_from_configuration(cfg)
-                
-                active_limbs = ["neck"]
+                # 复位时只让neck动
                 mask = np.zeros(model.nv, dtype=bool)
                 for idx in joint_idx["neck"]:
                     mask[idx] = True
@@ -274,11 +229,10 @@ if __name__ == "__main__":
                 vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=0.5, limits=limits)
                 vel[~mask] = 0.0
                 cfg.integrate_inplace(vel, dt)
-                
                 if alpha >= 1.0:
-                    reset_state["active"] = False
-                    print("[Reset] 全局复位完成")
-                
+                    reset["active"] = False
+                    tasks[1].cost[:] = 1e-3  # 恢复posture cost
+                    print("[Reset] 复位完成")
                 mujoco.mj_forward(model, data)
                 data.qfrc_applied[:] = data.qfrc_bias[:]
                 mujoco.mj_camlight(model, data)
@@ -286,63 +240,34 @@ if __name__ == "__main__":
                 rate.sleep()
                 continue
             
-            # 检测移动的mocap
-            active_limbs = []
+            # 更新所有末端任务目标
+            for name, mid in mocap_ids.items():
+                ee_tasks[name].set_target(mink.SE3.from_mocap_id(data, mid))
+            
+            # 检测活动肢体(用于构建freeze constraint)
+            active_dofs = set(joint_idx["neck"])  # neck始终活动
             for name, mid in mocap_ids.items():
                 pos_diff = data.mocap_pos[mid] - prev_pos[name]
                 quat_diff = np.abs(data.mocap_quat[mid] - prev_quat[name])
-                pos_changed = np.dot(pos_diff, pos_diff) > threshold_sq
-                quat_changed = np.max(quat_diff) > quat_threshold
-                
-                ee_tasks[name].set_target(mink.SE3.from_mocap_id(data, mid))
-                
-                # waist只关心姿态变化（position_cost=0），其他关心位置和姿态
                 if name == "waist":
-                    if quat_changed:
-                        active_limbs.extend(ee_limbs[name])
+                    if np.max(quat_diff) > 0.005:
+                        for limb in ee_limbs[name]:
+                            active_dofs.update(joint_idx[limb])
                 else:
-                    if pos_changed or quat_changed:
-                        active_limbs.extend(ee_limbs[name])
-                
-                prev_pos[name] = data.mocap_pos[mid].copy()
-                prev_quat[name] = data.mocap_quat[mid].copy()
+                    if np.dot(pos_diff, pos_diff) > 1e-7 or np.max(quat_diff) > 0.005:
+                        for limb in ee_limbs[name]:
+                            active_dofs.update(joint_idx[limb])
+                prev_pos[name], prev_quat[name] = data.mocap_pos[mid].copy(), data.mocap_quat[mid].copy()
             
-            active_limbs.append("neck")
-            active_limbs = list(set(active_limbs))
+            # 构建冻结约束: 冻结非活动DOF
+            frozen_dofs = [i for i in all_dof_indices if i not in active_dofs]
+            constraints = []
+            if frozen_dofs:
+                constraints.append(mink.DofFreezingTask(model, dof_indices=frozen_dofs))
             
-            # 动态调整posture cost
-            if active_limbs:
-                mask = np.zeros(model.nv, dtype=bool)
-                for limb in active_limbs:
-                    if limb in joint_idx:
-                        for idx in joint_idx[limb]:
-                            mask[idx] = True
-                tasks[1].cost[:] = np.where(mask, 1e-2, 1e4)
-            else:
-                tasks[1].cost[:] = 1e-2
-            
-            # 求解IK
-            vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=0.5, limits=limits)
-            
-            if active_limbs:
-                mask = np.zeros(model.nv, dtype=bool)
-                for limb in active_limbs:
-                    if limb in joint_idx:
-                        for idx in joint_idx[limb]:
-                            mask[idx] = True
-                vel[~mask] = 0.0
-            else:
-                vel[:] = 0.0
-            
-            # 速度限制(过滤抖动)
-            vel = np.clip(vel, -MAX_VEL, MAX_VEL)
-            # 动作EMA平滑(neck关节不平滑，保持look-at响应)
-            neck_mask = np.zeros(model.nv, dtype=bool)
-            for idx in joint_idx["neck"]:
-                neck_mask[idx] = True
-            filtered_vel[~neck_mask] = ACTION_EMA_ALPHA * vel[~neck_mask] + (1 - ACTION_EMA_ALPHA) * filtered_vel[~neck_mask]
-            filtered_vel[neck_mask] = vel[neck_mask]  # neck直接使用原始速度
-            cfg.integrate_inplace(filtered_vel, dt)
+            # 求解IK(使用equality constraint冻结非活动关节)
+            vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=1e-3, limits=limits, constraints=constraints)
+            cfg.integrate_inplace(vel, dt)
             
             # 前馈扭矩补偿
             mujoco.mj_forward(model, data)
@@ -351,10 +276,7 @@ if __name__ == "__main__":
             print_counter += 1
             if print_counter >= 200:
                 print_counter = 0
-                tracking_str = "ON" if vr_data.tracking_enabled else "OFF"
-                calib_str = "YES" if vr_state["calibrated"] else "NO"
-                print(f"[VR] Tracking={tracking_str}, Calibrated={calib_str}")
-                print(f"[Compensation]:\n  {np.array2string(data.qfrc_applied[6:], precision=3, suppress_small=True)}")
+                print(f"[VR] Tracking={'ON' if vr_data.tracking_enabled else 'OFF'}, Calibrated={'YES' if vr_calib['done'] else 'NO'}")
             
             mujoco.mj_camlight(model, data)
             viewer.sync()

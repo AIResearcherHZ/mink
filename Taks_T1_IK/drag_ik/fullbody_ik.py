@@ -1,4 +1,7 @@
-"""全身独立肢体IK控制"""
+"""全身独立肢体IK控制 - 稳定版
+
+解决多路IK跳变: 使用DofFreezingTask作为equality constraint冻结非活动关节
+"""
 
 from pathlib import Path
 import numpy as np
@@ -55,14 +58,6 @@ COLLISION_PAIRS = [
     (["left_foot_collision", "right_foot_collision"], ["floor"]),
 ]
 
-# 速度限制参数(过滤抖动)
-MAX_VEL = 100.0  # rad/s
-
-# 动作EMA平滑参数
-# alpha越大响应越快，越小越平滑但有延迟
-# 0.3-0.5: 较平滑, 0.6-0.8: 快速响应, 1.0: 无平滑
-ACTION_EMA_ALPHA = 0.8
-
 # 全局状态
 reset_state = {"active": False, "alpha": 0.0, "start_pos": {}, "start_quat": {}, "start_q": None}
 
@@ -108,34 +103,31 @@ if __name__ == "__main__":
     cfg = mink.Configuration(model)
     model, data = cfg.model, cfg.data
     
-    # 预计算索引
+    # 预计算DOF索引
     joint_idx = {k: [model.jnt_dofadr[model.joint(j).id] for j in v] for k, v in JOINT_GROUPS.items()}
+    # 所有可控DOF索引
+    all_dof_indices = []
+    for limb in JOINT_GROUPS:
+        all_dof_indices.extend(joint_idx[limb])
+    all_dof_indices = sorted(set(all_dof_indices))
+    
     mocap_ids = {name: model.body(mocap).mocapid[0] for name, (_, mocap, _) in END_EFFECTORS.items()}
     ee_limbs = {name: limbs for name, (_, _, limbs) in END_EFFECTORS.items()}
-    
-    # neck_pitch的mocap id (用于look-at)
     neck_pitch_mid = model.body("neck_pitch_target").mocapid[0]
+    left_hand_mid, right_hand_mid = mocap_ids["left_hand"], mocap_ids["right_hand"]
     
-    # 创建任务
+    # 创建任务(固定cost)
     tasks = [
-        mink.FrameTask("pelvis", "body", position_cost=0.0, orientation_cost=0.0),
-        mink.PostureTask(model, cost=1e-2),
+        mink.FrameTask("pelvis", "body", position_cost=1e6, orientation_cost=1e6),  # 固定pelvis
+        mink.PostureTask(model, cost=1e-3),
     ]
-    # 手脚末端任务
     for name, (link, _, _) in END_EFFECTORS.items():
-        if name == "waist":
-            tasks.append(mink.FrameTask(link, "body", position_cost=0.0, orientation_cost=5.0))
-        else:
-            tasks.append(mink.FrameTask(link, "body", position_cost=5.0, orientation_cost=5.0))
-    # neck_pitch任务(look-at，只跟踪姿态)
-    neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=5.0)
+        cost = (0.0, 5.0) if name == "waist" else (5.0, 5.0)
+        tasks.append(mink.FrameTask(link, "body", position_cost=cost[0], orientation_cost=cost[1]))
+    neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=3.0)
     tasks.append(neck_task)
-    # 手肘向下约束（低权重，只约束Z方向位置）
-    left_elbow_task = mink.FrameTask("left_elbow_link", "body", position_cost=[0.0, 0.0, 0.5], orientation_cost=0.0)
-    right_elbow_task = mink.FrameTask("right_elbow_link", "body", position_cost=[0.0, 0.0, 0.5], orientation_cost=0.0)
-    tasks.extend([left_elbow_task, right_elbow_task])
-    
     ee_tasks = {name: tasks[i+2] for i, name in enumerate(END_EFFECTORS.keys())}
+    
     limits = [
         mink.ConfigurationLimit(model),
         mink.CollisionAvoidanceLimit(model, COLLISION_PAIRS, gain=0.5, 
@@ -167,9 +159,6 @@ if __name__ == "__main__":
         # 初始化neck_pitch mocap位置
         mink.move_mocap_to_frame(model, data, "neck_pitch_target", "neck_pitch_link", "body")
         neck_task.set_target_from_configuration(cfg)
-        # 初始化手肘向下约束目标
-        left_elbow_task.set_target_from_configuration(cfg)
-        right_elbow_task.set_target_from_configuration(cfg)
         
         # 保存初始位置
         init_q = cfg.q.copy()
@@ -179,17 +168,10 @@ if __name__ == "__main__":
         prev_pos = {name: data.mocap_pos[mid].copy() for name, mid in mocap_ids.items()}
         prev_quat = {name: data.mocap_quat[mid].copy() for name, mid in mocap_ids.items()}
         print_counter = 0
-        threshold_sq = 1e-6
-        quat_threshold = 0.01
         reset_duration = 1.5
-        
-        # 手部mocap id
-        left_hand_mid = mocap_ids["left_hand"]
-        right_hand_mid = mocap_ids["right_hand"]
         
         rate = RateLimiter(frequency=200.0, warn=False)
         dt = rate.dt
-        filtered_vel = np.zeros(model.nv)  # EMA平滑状态
         
         while viewer.is_running():
             # 计算双手中心点，更新neck look-at目标
@@ -228,6 +210,7 @@ if __name__ == "__main__":
                 
                 if alpha >= 1.0:
                     reset_state["active"] = False
+                    tasks[1].cost[:] = 1e-3  # 恢复posture cost
                     print("[Reset] 全局复位完成")
                 
                 mujoco.mj_forward(model, data)
@@ -237,66 +220,34 @@ if __name__ == "__main__":
                 rate.sleep()
                 continue
             
-            # 检测移动的mocap
-            active_limbs = []
+            # 更新所有末端任务目标
+            for name, mid in mocap_ids.items():
+                ee_tasks[name].set_target(mink.SE3.from_mocap_id(data, mid))
+            
+            # 检测活动肢体
+            active_dofs = set(joint_idx["neck"])
             for name, mid in mocap_ids.items():
                 pos_diff = data.mocap_pos[mid] - prev_pos[name]
                 quat_diff = np.abs(data.mocap_quat[mid] - prev_quat[name])
-                pos_changed = np.dot(pos_diff, pos_diff) > threshold_sq
-                quat_changed = np.max(quat_diff) > quat_threshold
-                
-                # 始终使用mocap位置作为目标
-                ee_tasks[name].set_target(mink.SE3.from_mocap_id(data, mid))
-                
-                # waist只关心姿态变化（position_cost=0），其他关心位置和姿态
                 if name == "waist":
-                    if quat_changed:
-                        active_limbs.extend(ee_limbs[name])
+                    if np.max(quat_diff) > 0.005:
+                        for limb in ee_limbs[name]:
+                            active_dofs.update(joint_idx[limb])
                 else:
-                    if pos_changed or quat_changed:
-                        active_limbs.extend(ee_limbs[name])
-                
-                prev_pos[name] = data.mocap_pos[mid].copy()
-                prev_quat[name] = data.mocap_quat[mid].copy()
+                    if np.dot(pos_diff, pos_diff) > 1e-7 or np.max(quat_diff) > 0.005:
+                        for limb in ee_limbs[name]:
+                            active_dofs.update(joint_idx[limb])
+                prev_pos[name], prev_quat[name] = data.mocap_pos[mid].copy(), data.mocap_quat[mid].copy()
             
-            # neck始终激活(look-at)
-            active_limbs.append("neck")
-            active_limbs = list(set(active_limbs))
+            # 构建冻结约束
+            frozen_dofs = [i for i in all_dof_indices if i not in active_dofs]
+            constraints = []
+            if frozen_dofs:
+                constraints.append(mink.DofFreezingTask(model, dof_indices=frozen_dofs))
             
-            # 动态调整posture cost
-            if active_limbs:
-                mask = np.zeros(model.nv, dtype=bool)
-                for limb in active_limbs:
-                    if limb in joint_idx:
-                        for idx in joint_idx[limb]:
-                            mask[idx] = True
-                tasks[1].cost[:] = np.where(mask, 1e-2, 1e4)
-            else:
-                tasks[1].cost[:] = 1e-2
-            
-            # 求解IK (增加damping减少抖动)
-            vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=0.5, limits=limits)
-            
-            # 只允许活动肢体运动
-            if active_limbs:
-                mask = np.zeros(model.nv, dtype=bool)
-                for limb in active_limbs:
-                    if limb in joint_idx:
-                        for idx in joint_idx[limb]:
-                            mask[idx] = True
-                vel[~mask] = 0.0
-            else:
-                vel[:] = 0.0
-            
-            # 速度限制(过滤抖动)
-            vel = np.clip(vel, -MAX_VEL, MAX_VEL)
-            # 动作EMA平滑(neck关节不平滑，保持look-at响应)
-            neck_mask = np.zeros(model.nv, dtype=bool)
-            for idx in joint_idx["neck"]:
-                neck_mask[idx] = True
-            filtered_vel[~neck_mask] = ACTION_EMA_ALPHA * vel[~neck_mask] + (1 - ACTION_EMA_ALPHA) * filtered_vel[~neck_mask]
-            filtered_vel[neck_mask] = vel[neck_mask]  # neck直接使用原始速度
-            cfg.integrate_inplace(filtered_vel, dt)
+            # 求解IK
+            vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=1e-3, limits=limits, constraints=constraints)
+            cfg.integrate_inplace(vel, dt)
             
             # 前馈扭矩补偿
             mujoco.mj_forward(model, data)
