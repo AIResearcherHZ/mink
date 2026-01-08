@@ -118,18 +118,22 @@ if __name__ == "__main__":
     
     # 创建任务
     tasks = [
-        mink.FrameTask("pelvis", "body", position_cost=5.0, orientation_cost=5.0),
+        mink.FrameTask("pelvis", "body", position_cost=0.0, orientation_cost=0.0),
         mink.PostureTask(model, cost=1e-2),
     ]
     # 手脚末端任务
     for name, (link, _, _) in END_EFFECTORS.items():
         if name == "waist":
-            tasks.append(mink.FrameTask(link, "body", position_cost=0.0, orientation_cost=2.0))
+            tasks.append(mink.FrameTask(link, "body", position_cost=0.0, orientation_cost=5.0))
         else:
-            tasks.append(mink.FrameTask(link, "body", position_cost=2.0, orientation_cost=2.0))
+            tasks.append(mink.FrameTask(link, "body", position_cost=5.0, orientation_cost=5.0))
     # neck_pitch任务(look-at，只跟踪姿态)
     neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=5.0)
     tasks.append(neck_task)
+    # 手肘向下约束（低权重，只约束Z方向位置）
+    left_elbow_task = mink.FrameTask("left_elbow_link", "body", position_cost=[0.0, 0.0, 0.5], orientation_cost=0.0)
+    right_elbow_task = mink.FrameTask("right_elbow_link", "body", position_cost=[0.0, 0.0, 0.5], orientation_cost=0.0)
+    tasks.extend([left_elbow_task, right_elbow_task])
     
     ee_tasks = {name: tasks[i+2] for i, name in enumerate(END_EFFECTORS.keys())}
     limits = [
@@ -163,6 +167,9 @@ if __name__ == "__main__":
         # 初始化neck_pitch mocap位置
         mink.move_mocap_to_frame(model, data, "neck_pitch_target", "neck_pitch_link", "body")
         neck_task.set_target_from_configuration(cfg)
+        # 初始化手肘向下约束目标
+        left_elbow_task.set_target_from_configuration(cfg)
+        right_elbow_task.set_target_from_configuration(cfg)
         
         # 保存初始位置
         init_q = cfg.q.copy()
