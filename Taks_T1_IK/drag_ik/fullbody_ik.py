@@ -7,7 +7,7 @@ import mujoco.viewer
 from loop_rate_limiters import RateLimiter
 import mink
 
-_XML = Path(__file__).parent / "assets" / "Taks_T1" / "scene_Taks_T1.xml"
+_XML = Path(__file__).parent.parent / "assets" / "Taks_T1" / "scene_Taks_T1.xml"
 
 # 关节分组
 JOINT_GROUPS = {
@@ -54,6 +54,9 @@ COLLISION_PAIRS = [
     (["right_foot_collision"], ["torso_collision"]),
     (["left_foot_collision", "right_foot_collision"], ["floor"]),
 ]
+
+# 速度限制参数(过滤抖动)
+MAX_VEL = 100.0  # rad/s
 
 # 全局状态
 reset_state = {"active": False, "alpha": 0.0, "start_pos": {}, "start_quat": {}, "start_q": None}
@@ -115,7 +118,10 @@ if __name__ == "__main__":
     ]
     # 手脚末端任务
     for name, (link, _, _) in END_EFFECTORS.items():
-        tasks.append(mink.FrameTask(link, "body", position_cost=2.0, orientation_cost=2.0))
+        if name == "waist":
+            tasks.append(mink.FrameTask(link, "body", position_cost=0.0, orientation_cost=2.0))
+        else:
+            tasks.append(mink.FrameTask(link, "body", position_cost=2.0, orientation_cost=2.0))
     # neck_pitch任务(look-at，只跟踪姿态)
     neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=5.0)
     tasks.append(neck_task)
@@ -264,6 +270,8 @@ if __name__ == "__main__":
             else:
                 vel[:] = 0.0
             
+            # 速度限制(过滤抖动)
+            vel = np.clip(vel, -MAX_VEL, MAX_VEL)
             cfg.integrate_inplace(vel, dt)
             
             # 前馈扭矩补偿
