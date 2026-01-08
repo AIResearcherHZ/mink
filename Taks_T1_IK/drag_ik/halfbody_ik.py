@@ -43,6 +43,11 @@ COLLISION_PAIRS = [
 # 速度限制参数(过滤抖动)
 MAX_VEL = 100.0  # rad/s
 
+# 动作EMA平滑参数
+# alpha越大响应越快，越小越平滑但有延迟
+# 0.3-0.5: 较平滑, 0.6-0.8: 快速响应, 1.0: 无平滑
+ACTION_EMA_ALPHA = 0.7
+
 # 全局状态
 reset_state = {"active": False, "alpha": 0.0, "start_pos": {}, "start_quat": {}, "start_q": None}
 
@@ -162,6 +167,7 @@ if __name__ == "__main__":
         
         rate = RateLimiter(frequency=200.0, warn=False)
         dt = rate.dt
+        filtered_vel = np.zeros(model.nv)  # EMA平滑状态
         
         while viewer.is_running():
             # 计算双手中心点，更新neck look-at目标
@@ -257,7 +263,13 @@ if __name__ == "__main__":
             
             # 速度限制(过滤抖动)
             vel = np.clip(vel, -MAX_VEL, MAX_VEL)
-            cfg.integrate_inplace(vel, dt)
+            # 动作EMA平滑(neck关节不平滑，保持look-at响应)
+            neck_mask = np.zeros(model.nv, dtype=bool)
+            for idx in joint_idx["neck"]:
+                neck_mask[idx] = True
+            filtered_vel[~neck_mask] = ACTION_EMA_ALPHA * vel[~neck_mask] + (1 - ACTION_EMA_ALPHA) * filtered_vel[~neck_mask]
+            filtered_vel[neck_mask] = vel[neck_mask]  # neck直接使用原始速度
+            cfg.integrate_inplace(filtered_vel, dt)
             
             # 前馈扭矩补偿
             mujoco.mj_forward(model, data)

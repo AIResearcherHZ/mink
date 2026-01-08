@@ -47,6 +47,11 @@ COLLISION_PAIRS = [
 # 速度限制参数(过滤抖动)
 MAX_VEL = 100.0  # rad/s
 
+# 动作EMA平滑参数
+# alpha越大响应越快，越小越平滑但有延迟
+# 0.3-0.5: 较平滑, 0.6-0.8: 快速响应, 1.0: 无平滑
+ACTION_EMA_ALPHA = 0.7
+
 # 全局状态
 reset_state = {"active": False, "alpha": 0.0, "start_pos": {}, "start_quat": {}, "start_q": None}
 
@@ -100,14 +105,14 @@ if __name__ == "__main__":
     
     # 创建任务
     tasks = [
-        mink.FrameTask("base_link", "body", position_cost=5.0, orientation_cost=5.0),
+        mink.FrameTask("base_link", "body", position_cost=0.0, orientation_cost=0.0),
         mink.PostureTask(model, cost=1e-2),
     ]
     for name, (link, _, _) in END_EFFECTORS.items():
         if name == "waist":
-            tasks.append(mink.FrameTask(link, "body", position_cost=0.0, orientation_cost=2.0))
+            tasks.append(mink.FrameTask(link, "body", position_cost=5.0, orientation_cost=5.0))
         else:
-            tasks.append(mink.FrameTask(link, "body", position_cost=2.0, orientation_cost=2.0))
+            tasks.append(mink.FrameTask(link, "body", position_cost=5.0, orientation_cost=5.0))
     neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=5.0)
     tasks.append(neck_task)
     
@@ -190,21 +195,47 @@ if __name__ == "__main__":
         
         rate = RateLimiter(frequency=200.0, warn=False)
         dt = rate.dt
+        filtered_vel = np.zeros(model.nv)  # EMA平滑状态
         
-        print("[Info] 按C键校准VR，按Backspace复位")
+        print("[Info] 键盘: C=校准, Backspace=复位 | VR手柄: B双击=校准, A双击=复位")
         
         while viewer.is_running():
             # 获取VR数据并更新mocap
             vr_data = vr.data
+            
+            # 检测 VR按键双击事件: B双击=校准, A双击=复位
+            if vr_data.button_events.right_b:  # B双击: 校准
+                if vr_data.tracking_enabled:
+                    left_mocap = data.mocap_pos[mocap_ids["left_hand"]]
+                    right_mocap = data.mocap_pos[mocap_ids["right_hand"]]
+                    vr_state["left_offset"] = left_mocap - vr_data.left_hand.position
+                    vr_state["right_offset"] = right_mocap - vr_data.right_hand.position
+                    waist_pos = data.mocap_pos[mocap_ids["waist"]]
+                    vr_state["head_to_waist"] = waist_pos - vr_data.head.position
+                    vr_state["calibrated"] = True
+                    print(f"[VR] B双击校准完成: L={vr_state['left_offset']}, R={vr_state['right_offset']}")
+                else:
+                    print("[VR] 未启用追踪，无法校准")
+            
+            if vr_data.button_events.right_a:  # A双击: 复位
+                reset_state["active"] = True
+                reset_state["alpha"] = 0.0
+                reset_state["start_q"] = cfg.q.copy()
+                for name, mid in mocap_ids.items():
+                    reset_state["start_pos"][name] = data.mocap_pos[mid].copy()
+                    reset_state["start_quat"][name] = data.mocap_quat[mid].copy()
+                print("[VR] A双击复位开始...")
+            
             if vr_state["calibrated"] and vr_data.tracking_enabled:
                 # 手部位置 = VR手部 + 偏移
                 data.mocap_pos[left_hand_mid] = vr_data.left_hand.position + vr_state["left_offset"]
                 data.mocap_quat[left_hand_mid] = vr_data.left_hand.quaternion
                 data.mocap_pos[right_hand_mid] = vr_data.right_hand.position + vr_state["right_offset"]
                 data.mocap_quat[right_hand_mid] = vr_data.right_hand.quaternion
-                # 腰部位置 = VR头部 + 头到腰偏移
+                # 腰部: 位置 = VR头部 + 头到腰偏移, 姿态 = VR头部姿态
                 waist_mid = mocap_ids["waist"]
                 data.mocap_pos[waist_mid] = vr_data.head.position + vr_state["head_to_waist"]
+                data.mocap_quat[waist_mid] = vr_data.head.quaternion
             
             # look-at目标
             hands_center = (data.mocap_pos[left_hand_mid] + data.mocap_pos[right_hand_mid]) / 2.0
@@ -293,7 +324,13 @@ if __name__ == "__main__":
             
             # 速度限制(过滤抖动)
             vel = np.clip(vel, -MAX_VEL, MAX_VEL)
-            cfg.integrate_inplace(vel, dt)
+            # 动作EMA平滑(neck关节不平滑，保持look-at响应)
+            neck_mask = np.zeros(model.nv, dtype=bool)
+            for idx in joint_idx["neck"]:
+                neck_mask[idx] = True
+            filtered_vel[~neck_mask] = ACTION_EMA_ALPHA * vel[~neck_mask] + (1 - ACTION_EMA_ALPHA) * filtered_vel[~neck_mask]
+            filtered_vel[neck_mask] = vel[neck_mask]  # neck直接使用原始速度
+            cfg.integrate_inplace(filtered_vel, dt)
             
             # 前馈扭矩补偿
             mujoco.mj_forward(model, data)
