@@ -50,8 +50,8 @@
       <geom type="cylinder" size="0.003 0.04" pos="0 0.04 0" euler="90 0 0" contype="0" conaffinity="0" rgba="0 1 0 1"/>  <!-- Y轴-绿色-向左 -->
       <geom type="cylinder" size="0.003 0.04" pos="0 0 0.04" contype="0" conaffinity="0" rgba="0 0 1 1"/>  <!-- Z轴-蓝色-向上 -->
     </body>
-    <!-- Waist target -->
-    <body name="waist_target" pos="0.0000 0.0300 1.0605" mocap="true">
+    <!-- Waist target (neck_yaw_link) -->
+    <body name="waist_target" pos="0.0000 0.0000 1.2525" mocap="true">
       <geom type="sphere" size=".03" contype="0" conaffinity="0" rgba=".5 .2 .8 .5"/>
       <geom type="cylinder" size="0.003 0.04" pos="0.04 0 0" euler="0 90 0" contype="0" conaffinity="0" rgba="1 0 0 1"/>
       <geom type="cylinder" size="0.003 0.04" pos="0 0.04 0" euler="90 0 0" contype="0" conaffinity="0" rgba="0 1 0 1"/>

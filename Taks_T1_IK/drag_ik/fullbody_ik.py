@@ -29,7 +29,7 @@ END_EFFECTORS = {
     "right_hand": ("right_wrist_pitch_link", "right_hand_target", ["right_arm"]),
     "left_foot": ("left_ankle_roll_link", "left_foot_target", ["left_leg"]),
     "right_foot": ("right_ankle_roll_link", "right_foot_target", ["right_leg"]),
-    "waist": ("torso_link", "waist_target", ["waist"]),
+    "waist": ("neck_yaw_link", "waist_target", ["waist"]),
 }
 
 # 碰撞对
@@ -248,8 +248,13 @@ if __name__ == "__main__":
                 # 始终使用mocap位置作为目标
                 ee_tasks[name].set_target(mink.SE3.from_mocap_id(data, mid))
                 
-                if pos_changed or quat_changed:
-                    active_limbs.extend(ee_limbs[name])
+                # waist只关心姿态变化（position_cost=0），其他关心位置和姿态
+                if name == "waist":
+                    if quat_changed:
+                        active_limbs.extend(ee_limbs[name])
+                else:
+                    if pos_changed or quat_changed:
+                        active_limbs.extend(ee_limbs[name])
                 
                 prev_pos[name] = data.mocap_pos[mid].copy()
                 prev_quat[name] = data.mocap_quat[mid].copy()

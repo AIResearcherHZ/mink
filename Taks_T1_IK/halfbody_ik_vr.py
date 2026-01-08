@@ -27,7 +27,7 @@ JOINT_GROUPS = {
 END_EFFECTORS = {
     "left_hand": ("left_wrist_pitch_link", "left_hand_target", ["left_arm"]),
     "right_hand": ("right_wrist_pitch_link", "right_hand_target", ["right_arm"]),
-    "waist": ("torso_link", "waist_target", ["waist"]),
+    "waist": ("neck_yaw_link", "waist_target", ["waist"]),
 }
 
 # 碰撞对
@@ -132,12 +132,12 @@ if __name__ == "__main__":
     vr = VRReceiver()
     vr.start()
     
-    # VR校准状态: 包含手部偏移和头部到腰部的偏移
+    # VR校准状态: 包含手部偏移和头部到neck_yaw_link的偏移
     vr_state = {
         "calibrated": False,
         "left_offset": np.zeros(3),
         "right_offset": np.zeros(3),
-        "head_to_waist": np.zeros(3),  # VR头部到MuJoCo腰部的偏移
+        "head_to_waist": np.zeros(3),
     }
     
     def key_callback(keycode: int) -> None:
@@ -157,7 +157,7 @@ if __name__ == "__main__":
                 right_mocap = data.mocap_pos[mocap_ids["right_hand"]]
                 vr_state["left_offset"] = left_mocap - vr_data.left_hand.position
                 vr_state["right_offset"] = right_mocap - vr_data.right_hand.position
-                # 头部到腰部偏移: MuJoCo腰部位置 - VR头部位置
+                # 头部到neck_yaw_link偏移: MuJoCo waist目标位置 - VR头部位置
                 waist_pos = data.mocap_pos[mocap_ids["waist"]]
                 vr_state["head_to_waist"] = waist_pos - vr_data.head.position
                 vr_state["calibrated"] = True
@@ -239,7 +239,7 @@ if __name__ == "__main__":
                 data.mocap_quat[left_hand_mid] = vr_data.left_hand.quaternion
                 data.mocap_pos[right_hand_mid] = vr_data.right_hand.position + vr_state["right_offset"]
                 data.mocap_quat[right_hand_mid] = vr_data.right_hand.quaternion
-                # 腰部: 位置 = VR头部 + 头到腰偏移, 姿态 = VR头部姿态
+                # waist(neck_yaw_link): 位置 = VR头部 + 偏移, 姿态 = VR头部姿态
                 waist_mid = mocap_ids["waist"]
                 data.mocap_pos[waist_mid] = vr_data.head.position + vr_state["head_to_waist"]
                 data.mocap_quat[waist_mid] = vr_data.head.quaternion
@@ -296,8 +296,13 @@ if __name__ == "__main__":
                 
                 ee_tasks[name].set_target(mink.SE3.from_mocap_id(data, mid))
                 
-                if pos_changed or quat_changed:
-                    active_limbs.extend(ee_limbs[name])
+                # waist只关心姿态变化（position_cost=0），其他关心位置和姿态
+                if name == "waist":
+                    if quat_changed:
+                        active_limbs.extend(ee_limbs[name])
+                else:
+                    if pos_changed or quat_changed:
+                        active_limbs.extend(ee_limbs[name])
                 
                 prev_pos[name] = data.mocap_pos[mid].copy()
                 prev_quat[name] = data.mocap_quat[mid].copy()
