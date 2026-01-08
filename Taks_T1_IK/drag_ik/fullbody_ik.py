@@ -61,7 +61,7 @@ MAX_VEL = 100.0  # rad/s
 # 动作EMA平滑参数
 # alpha越大响应越快，越小越平滑但有延迟
 # 0.3-0.5: 较平滑, 0.6-0.8: 快速响应, 1.0: 无平滑
-ACTION_EMA_ALPHA = 0.7
+ACTION_EMA_ALPHA = 0.8
 
 # 全局状态
 reset_state = {"active": False, "alpha": 0.0, "start_pos": {}, "start_quat": {}, "start_q": None}

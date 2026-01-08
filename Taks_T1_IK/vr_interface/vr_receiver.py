@@ -20,7 +20,7 @@ UDP_PORT = 7000
 BUFFER_SIZE = 4096
 
 # EMA平滑参数
-DEFAULT_EMA_ALPHA = 0.3  # 平滑系数(0-1, 越小越平滑)
+DEFAULT_EMA_ALPHA = 0.2  # 平滑系数(0-1, 越小越平滑)
 DEFAULT_TARGET_FPS = 100.0  # 目标输出帧率
 
 
