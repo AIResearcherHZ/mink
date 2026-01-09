@@ -1,18 +1,23 @@
-"""半身VR控制IK - 稳定版
+"""半身VR控制IK - SIM2REAL版
 
 解决多路IK跳变: 使用DofFreezingTask作为equality constraint冻结非活动关节
+支持taks SDK实现SIM2REAL控制
 """
 
 import sys
+import argparse
 from pathlib import Path
 import numpy as np
 import mujoco
 import mujoco.viewer
 from loop_rate_limiters import RateLimiter
 import mink
+import threading
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent / "taks_sdk"))
 from vr_interface import VRReceiver
+import taks
 
 _XML = Path(__file__).parent / "assets" / "Semi_Taks_T1" / "scene_Semi_Taks_T1.xml"
 
@@ -24,6 +29,26 @@ JOINT_GROUPS = {
                   "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_yaw_joint", "right_wrist_pitch_joint"],
     "waist": ["waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"],
     "neck": ["neck_yaw_joint", "neck_roll_joint", "neck_pitch_joint"],
+}
+
+# MuJoCo关节名 -> SDK关节ID映射
+JOINT_NAME_TO_SDK_ID = {
+    "right_shoulder_pitch_joint": 1, "right_shoulder_roll_joint": 2, "right_shoulder_yaw_joint": 3,
+    "right_elbow_joint": 4, "right_wrist_roll_joint": 5, "right_wrist_yaw_joint": 6, "right_wrist_pitch_joint": 7,
+    "left_shoulder_pitch_joint": 9, "left_shoulder_roll_joint": 10, "left_shoulder_yaw_joint": 11,
+    "left_elbow_joint": 12, "left_wrist_roll_joint": 13, "left_wrist_yaw_joint": 14, "left_wrist_pitch_joint": 15,
+    "waist_yaw_joint": 17, "waist_roll_joint": 18, "waist_pitch_joint": 19,
+    "neck_yaw_joint": 20, "neck_roll_joint": 21, "neck_pitch_joint": 22,
+}
+
+# SDK关节默认KP/KD (与SDK_MF.py JOINT_CONFIG一致)
+SDK_JOINT_GAINS = {
+    1: (20.0, 2.0), 2: (20.0, 2.0), 3: (20.0, 2.0), 4: (20.0, 2.0),
+    5: (10.0, 1.0), 6: (10.0, 1.0), 7: (10.0, 1.0),
+    9: (20.0, 2.0), 10: (20.0, 2.0), 11: (20.0, 2.0), 12: (20.0, 2.0),
+    13: (10.0, 1.0), 14: (10.0, 1.0), 15: (10.0, 1.0),
+    17: (250.0, 5.0), 18: (250.0, 5.0), 19: (250.0, 5.0),
+    20: (1.0, 0.5), 21: (1.0, 0.5), 22: (1.0, 0.5),
 }
 
 # 末端执行器: (link, mocap, limbs)
@@ -82,18 +107,53 @@ def compute_lookat_quat(head_pos: np.ndarray, target_pos: np.ndarray) -> np.ndar
     return np.array([w, xyz[0], xyz[1], xyz[2]])
 
 
-if __name__ == "__main__":
+def parse_args():
+    parser = argparse.ArgumentParser(description="半身VR控制IK - SIM2REAL")
+    parser.add_argument("--headless", action="store_true", default=False, help="无头模式(无GUI)")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="taks服务器地址")
+    parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
+    parser.add_argument("--no-real", action="store_true", default=True, help="禁用真机控制(仅仿真)")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    headless = args.headless
+    enable_real = not args.no_real
+    
     model = mujoco.MjModel.from_xml_path(_XML.as_posix())
     cfg = mink.Configuration(model)
     model, data = cfg.model, cfg.data
     
-    # 预计算DOF索引
+    # 预计算DOF索引和关节ID映射
     joint_idx = {k: [model.jnt_dofadr[model.joint(j).id] for j in v] for k, v in JOINT_GROUPS.items()}
     # 所有可控DOF索引(排除floating base)
     all_dof_indices = []
     for limb in JOINT_GROUPS:
         all_dof_indices.extend(joint_idx[limb])
     all_dof_indices = sorted(set(all_dof_indices))
+    
+    # 构建DOF索引 -> SDK关节ID映射
+    dof_to_sdk_id = {}
+    joint_name_to_dof = {}
+    for group, names in JOINT_GROUPS.items():
+        for jname in names:
+            jid = model.joint(jname).id
+            dof = model.jnt_dofadr[jid]
+            joint_name_to_dof[jname] = dof
+            if jname in JOINT_NAME_TO_SDK_ID:
+                dof_to_sdk_id[dof] = JOINT_NAME_TO_SDK_ID[jname]
+    
+    # 连接taks服务器
+    robot = None
+    if enable_real:
+        try:
+            taks.connect(args.host, cmd_port=args.port)
+            robot = taks.register("Taks-T1-semibody")
+            print(f"[TAKS] 已连接 {args.host}:{args.port}")
+        except Exception as e:
+            print(f"[TAKS] 连接失败: {e}, 仅仿真模式")
+            enable_real = False
     
     mocap_ids = {name: model.body(mocap).mocapid[0] for name, (_, mocap, _) in END_EFFECTORS.items()}
     ee_limbs = {name: limbs for name, (_, _, limbs) in END_EFFECTORS.items()}
@@ -102,11 +162,11 @@ if __name__ == "__main__":
     
     # 创建任务(固定cost，不动态调整)
     tasks = [
-        mink.FrameTask("base_link", "body", position_cost=1e6, orientation_cost=1e6),  # 固定base_link
-        mink.PostureTask(model, cost=1e-2),  # posture正则化
+        mink.FrameTask("base_link", "body", position_cost=1e6, orientation_cost=1e6),
+        mink.PostureTask(model, cost=1e-2),
     ]
     for name, (link, _, _) in END_EFFECTORS.items():
-        cost = (0.0, 2.0) if name == "waist" else (2.0, 2.0)  # 降低cost减少超范围抖动
+        cost = (0.0, 2.0) if name == "waist" else (2.0, 2.0)
         tasks.append(mink.FrameTask(link, "body", position_cost=cost[0], orientation_cost=cost[1]))
     neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=1.0)
     tasks.append(neck_task)
@@ -114,7 +174,7 @@ if __name__ == "__main__":
     
     limits = [
         mink.ConfigurationLimit(model),
-        mink.VelocityLimit(model),  # 限制关节速度，防止超范围抖动
+        mink.VelocityLimit(model),
         mink.CollisionAvoidanceLimit(model, COLLISION_PAIRS, gain=0.5, 
                                      minimum_distance_from_collisions=0.02, 
                                      collision_detection_distance=0.1)
@@ -127,10 +187,11 @@ if __name__ == "__main__":
     # VR校准状态
     vr_calib = {"done": False, "left": np.zeros(3), "right": np.zeros(3), "head": np.zeros(3)}
     # 复位状态
-    reset = {"active": False, "alpha": 0.0, "start_q": None, "start_pos": {}, "start_quat": {}}
+    reset_state = {"active": False, "alpha": 0.0, "start_q": None, "start_pos": {}, "start_quat": {}}
+    # 运行状态
+    running = True
     
     def do_calibrate():
-        """执行VR校准"""
         vr_data = vr.data
         if not vr_data.tracking_enabled:
             print("[VR] 未启用追踪，无法校准")
@@ -139,17 +200,16 @@ if __name__ == "__main__":
         vr_calib["right"] = data.mocap_pos[right_hand_mid] - vr_data.right_hand.position
         vr_calib["head"] = data.mocap_pos[waist_mid] - vr_data.head.position
         vr_calib["done"] = True
-        vr.reset_smooth()  # 重置VR接收器平滑状态
-        print(f"[VR] 校准完成: L={vr_calib['left']}, R={vr_calib['right']}")
+        vr.reset_smooth()
+        print(f"[VR] 校准完成")
     
     def do_reset():
-        """开始复位"""
-        reset["active"] = True
-        reset["alpha"] = 0.0
-        reset["start_q"] = cfg.q.copy()
+        reset_state["active"] = True
+        reset_state["alpha"] = 0.0
+        reset_state["start_q"] = cfg.q.copy()
         for name, mid in mocap_ids.items():
-            reset["start_pos"][name] = data.mocap_pos[mid].copy()
-            reset["start_quat"][name] = data.mocap_quat[mid].copy()
+            reset_state["start_pos"][name] = data.mocap_pos[mid].copy()
+            reset_state["start_quat"][name] = data.mocap_quat[mid].copy()
         vr.reset_smooth()
         print("[Reset] 复位开始...")
     
@@ -159,35 +219,56 @@ if __name__ == "__main__":
         elif keycode == 67:  # C
             do_calibrate()
     
-    with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False, 
-                                       key_callback=key_callback) as viewer:
-        mujoco.mjv_defaultFreeCamera(model, viewer.cam)
-        
-        # 初始化
-        cfg.update_from_keyframe("home")
-        tasks[0].set_target_from_configuration(cfg)
-        tasks[1].set_target_from_configuration(cfg)
-        for name, (link, mocap, _) in END_EFFECTORS.items():
-            mink.move_mocap_to_frame(model, data, mocap, link, "body")
-            ee_tasks[name].set_target_from_configuration(cfg)
-        mink.move_mocap_to_frame(model, data, "neck_pitch_target", "neck_pitch_link", "body")
-        neck_task.set_target_from_configuration(cfg)
-        
-        # 保存初始状态
-        init_q = cfg.q.copy()
-        init_pos = {name: data.mocap_pos[mid].copy() for name, mid in mocap_ids.items()}
-        init_quat = {name: data.mocap_quat[mid].copy() for name, mid in mocap_ids.items()}
-        prev_pos = {name: pos.copy() for name, pos in init_pos.items()}
-        prev_quat = {name: quat.copy() for name, quat in init_quat.items()}
-        
-        rate = RateLimiter(frequency=200.0, warn=False)
-        dt = rate.dt
-        reset_duration = 1.5
-        print_counter = 0
-        
-        print("[Info] 键盘: C=校准, Backspace=复位 | VR手柄: B双击=校准, A双击=复位")
-        
-        while viewer.is_running():
+    def send_to_real(q_arr, tau_arr):
+        """发送关节位置和前馈扭矩到真机"""
+        if not enable_real or robot is None:
+            return
+        mit_cmd = {}
+        for dof_idx in all_dof_indices:
+            if dof_idx not in dof_to_sdk_id:
+                continue
+            sdk_id = dof_to_sdk_id[dof_idx]
+            kp, kd = SDK_JOINT_GAINS.get(sdk_id, (10.0, 1.0))
+            # 获取关节位置和前馈扭矩
+            q_val = float(q_arr[dof_idx]) if dof_idx < len(q_arr) else 0.0
+            tau_val = float(tau_arr[dof_idx]) if dof_idx < len(tau_arr) else 0.0
+            mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': tau_val, 'kp': kp, 'kd': kd}
+        if mit_cmd:
+            robot.controlMIT(mit_cmd)
+    
+    # 初始化配置
+    cfg.update_from_keyframe("home")
+    tasks[0].set_target_from_configuration(cfg)
+    tasks[1].set_target_from_configuration(cfg)
+    for name, (link, mocap, _) in END_EFFECTORS.items():
+        mink.move_mocap_to_frame(model, data, mocap, link, "body")
+        ee_tasks[name].set_target_from_configuration(cfg)
+    mink.move_mocap_to_frame(model, data, "neck_pitch_target", "neck_pitch_link", "body")
+    neck_task.set_target_from_configuration(cfg)
+    
+    # 保存初始状态
+    init_q = cfg.q.copy()
+    init_pos = {name: data.mocap_pos[mid].copy() for name, mid in mocap_ids.items()}
+    init_quat = {name: data.mocap_quat[mid].copy() for name, mid in mocap_ids.items()}
+    prev_pos = {name: pos.copy() for name, pos in init_pos.items()}
+    prev_quat = {name: quat.copy() for name, quat in init_quat.items()}
+    
+    rate = RateLimiter(frequency=200.0, warn=False)
+    dt = rate.dt
+    reset_duration = 1.5
+    print_counter = 0
+    
+    mode_str = "有头" if not headless else "无头"
+    real_str = "SIM2REAL" if enable_real else "仅仿真"
+    print(f"[Info] 模式: {mode_str}, {real_str}")
+    print("[Info] 键盘: C=校准, Backspace=复位 | VR手柄: B双击=校准, A双击=复位")
+    
+    def control_loop(viewer=None):
+        nonlocal print_counter, running
+        while running:
+            if viewer is not None and not viewer.is_running():
+                break
+            
             vr_data = vr.data
             
             # VR按键事件
@@ -196,7 +277,7 @@ if __name__ == "__main__":
             if vr_data.button_events.right_a:
                 do_reset()
             
-            # VR数据更新mocap(已由VR接收器平滑)
+            # VR数据更新mocap
             if vr_calib["done"] and vr_data.tracking_enabled:
                 data.mocap_pos[left_hand_mid] = vr_data.left_hand.position + vr_calib["left"]
                 data.mocap_quat[left_hand_mid] = vr_data.left_hand.quaternion
@@ -212,17 +293,16 @@ if __name__ == "__main__":
             neck_task.set_target(mink.SE3.from_mocap_id(data, neck_pitch_mid))
             
             # 复位处理
-            if reset["active"]:
-                reset["alpha"] += dt / reset_duration
-                alpha = min(1.0, reset["alpha"])
+            if reset_state["active"]:
+                reset_state["alpha"] += dt / reset_duration
+                alpha = min(1.0, reset_state["alpha"])
                 for name, mid in mocap_ids.items():
-                    data.mocap_pos[mid] = (1 - alpha) * reset["start_pos"][name] + alpha * init_pos[name]
-                    data.mocap_quat[mid] = slerp(reset["start_quat"][name], init_quat[name], alpha)
+                    data.mocap_pos[mid] = (1 - alpha) * reset_state["start_pos"][name] + alpha * init_pos[name]
+                    data.mocap_quat[mid] = slerp(reset_state["start_quat"][name], init_quat[name], alpha)
                     prev_pos[name], prev_quat[name] = data.mocap_pos[mid].copy(), data.mocap_quat[mid].copy()
-                cfg.update(reset["start_q"] * (1 - alpha) + init_q * alpha)
+                cfg.update(reset_state["start_q"] * (1 - alpha) + init_q * alpha)
                 for name in END_EFFECTORS:
                     ee_tasks[name].set_target_from_configuration(cfg)
-                # 复位时只让neck动
                 mask = np.zeros(model.nv, dtype=bool)
                 for idx in joint_idx["neck"]:
                     mask[idx] = True
@@ -231,13 +311,15 @@ if __name__ == "__main__":
                 vel[~mask] = 0.0
                 cfg.integrate_inplace(vel, dt)
                 if alpha >= 1.0:
-                    reset["active"] = False
-                    tasks[1].cost[:] = 1e-2  # 恢复posture cost
+                    reset_state["active"] = False
+                    tasks[1].cost[:] = 1e-2
                     print("[Reset] 复位完成")
                 mujoco.mj_forward(model, data)
                 data.qfrc_applied[:] = data.qfrc_bias[:]
-                mujoco.mj_camlight(model, data)
-                viewer.sync()
+                send_to_real(cfg.q, data.qfrc_bias)
+                if viewer:
+                    mujoco.mj_camlight(model, data)
+                    viewer.sync()
                 rate.sleep()
                 continue
             
@@ -245,8 +327,8 @@ if __name__ == "__main__":
             for name, mid in mocap_ids.items():
                 ee_tasks[name].set_target(mink.SE3.from_mocap_id(data, mid))
             
-            # 检测活动肢体(用于构建freeze constraint)
-            active_dofs = set(joint_idx["neck"])  # neck始终活动
+            # 检测活动肢体
+            active_dofs = set(joint_idx["neck"])
             for name, mid in mocap_ids.items():
                 pos_diff = data.mocap_pos[mid] - prev_pos[name]
                 quat_diff = np.abs(data.mocap_quat[mid] - prev_quat[name])
@@ -260,13 +342,13 @@ if __name__ == "__main__":
                             active_dofs.update(joint_idx[limb])
                 prev_pos[name], prev_quat[name] = data.mocap_pos[mid].copy(), data.mocap_quat[mid].copy()
             
-            # 构建冻结约束: 冻结非活动DOF
+            # 构建冻结约束
             frozen_dofs = [i for i in all_dof_indices if i not in active_dofs]
             constraints = []
             if frozen_dofs:
                 constraints.append(mink.DofFreezingTask(model, dof_indices=frozen_dofs))
             
-            # 求解IK(damping提高奇异点稳定性)
+            # 求解IK
             vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=1e-1, limits=limits, constraints=constraints)
             cfg.integrate_inplace(vel, dt)
             
@@ -274,13 +356,37 @@ if __name__ == "__main__":
             mujoco.mj_forward(model, data)
             data.qfrc_applied[:] = data.qfrc_bias[:]
             
+            # 发送到真机
+            send_to_real(cfg.q, data.qfrc_bias)
+            
             print_counter += 1
             if print_counter >= 200:
                 print_counter = 0
-                print(f"[VR] Tracking={'ON' if vr_data.tracking_enabled else 'OFF'}, Calibrated={'YES' if vr_calib['done'] else 'NO'}")
+                print(f"[VR] Tracking={'ON' if vr_data.tracking_enabled else 'OFF'}, Calibrated={'YES' if vr_calib['done'] else 'NO'}, Real={'ON' if enable_real else 'OFF'}")
             
-            mujoco.mj_camlight(model, data)
-            viewer.sync()
+            if viewer:
+                mujoco.mj_camlight(model, data)
+                viewer.sync()
             rate.sleep()
     
-    vr.stop()
+    try:
+        if headless:
+            print("[Info] 无头模式运行中，Ctrl+C退出")
+            control_loop(viewer=None)
+        else:
+            with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False, 
+                                               key_callback=key_callback) as viewer:
+                mujoco.mjv_defaultFreeCamera(model, viewer.cam)
+                control_loop(viewer=viewer)
+    except KeyboardInterrupt:
+        print("\n[Info] 用户中断")
+    finally:
+        running = False
+        vr.stop()
+        if enable_real:
+            taks.disconnect()
+            print("[TAKS] 已断开")
+
+
+if __name__ == "__main__":
+    main()
