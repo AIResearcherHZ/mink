@@ -110,9 +110,9 @@ def compute_lookat_quat(head_pos: np.ndarray, target_pos: np.ndarray) -> np.ndar
 def parse_args():
     parser = argparse.ArgumentParser(description="半身VR控制IK - SIM2REAL")
     parser.add_argument("--headless", action="store_true", default=False, help="无头模式(无GUI)")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="taks服务器地址")
+    parser.add_argument("--host", type=str, default="192.168.5.16", help="taks服务器地址") # 本机127.0.0.1，远程192.168.5.16
     parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
-    parser.add_argument("--no-real", action="store_true", default=True, help="禁用真机控制(仅仿真)")
+    parser.add_argument("--no-real", action="store_true", default=False, help="禁用真机控制(仅仿真)")
     return parser.parse_args()
 
 
@@ -133,16 +133,16 @@ def main():
         all_dof_indices.extend(joint_idx[limb])
     all_dof_indices = sorted(set(all_dof_indices))
     
-    # 构建DOF索引 -> SDK关节ID映射
-    dof_to_sdk_id = {}
-    joint_name_to_dof = {}
+    # 构建关节名 -> (qpos索引, dof索引, SDK ID)映射
+    joint_mapping = {}  # jname -> {'qpos': int, 'dof': int, 'sdk_id': int}
     for group, names in JOINT_GROUPS.items():
         for jname in names:
             jid = model.joint(jname).id
-            dof = model.jnt_dofadr[jid]
-            joint_name_to_dof[jname] = dof
-            if jname in JOINT_NAME_TO_SDK_ID:
-                dof_to_sdk_id[dof] = JOINT_NAME_TO_SDK_ID[jname]
+            qpos_idx = model.jnt_qposadr[jid]  # qpos索引用于读取关节位置
+            dof_idx = model.jnt_dofadr[jid]    # dof索引用于读取扭矩
+            sdk_id = JOINT_NAME_TO_SDK_ID.get(jname)
+            if sdk_id is not None:
+                joint_mapping[jname] = {'qpos': qpos_idx, 'dof': dof_idx, 'sdk_id': sdk_id}
     
     # 连接taks服务器
     robot = None
@@ -224,13 +224,12 @@ def main():
         if not enable_real or robot is None:
             return
         mit_cmd = {}
-        for dof_idx in all_dof_indices:
-            if dof_idx not in dof_to_sdk_id:
-                continue
-            sdk_id = dof_to_sdk_id[dof_idx]
+        for jname, info in joint_mapping.items():
+            qpos_idx = info['qpos']
+            dof_idx = info['dof']
+            sdk_id = info['sdk_id']
             kp, kd = SDK_JOINT_GAINS.get(sdk_id, (10.0, 1.0))
-            # 获取关节位置和前馈扭矩
-            q_val = float(q_arr[dof_idx]) if dof_idx < len(q_arr) else 0.0
+            q_val = float(q_arr[qpos_idx]) if qpos_idx < len(q_arr) else 0.0
             tau_val = float(tau_arr[dof_idx]) if dof_idx < len(tau_arr) else 0.0
             mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': tau_val, 'kp': kp, 'kd': kd}
         if mit_cmd:
