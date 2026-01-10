@@ -146,11 +146,15 @@ def main():
     
     # 连接taks服务器
     robot = None
+    left_gripper = None
+    right_gripper = None
     if enable_real:
         try:
             taks.connect(args.host, cmd_port=args.port)
             robot = taks.register("Taks-T1-semibody")
-            print(f"[TAKS] 已连接 {args.host}:{args.port}")
+            left_gripper = taks.register("Taks-T1-leftgripper")
+            right_gripper = taks.register("Taks-T1-rightgripper")
+            print(f"[TAKS] 已连接 {args.host}:{args.port}, 且夹爪已注册")
         except Exception as e:
             print(f"[TAKS] 连接失败: {e}, 仅仿真模式")
             enable_real = False
@@ -234,6 +238,17 @@ def main():
             mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': tau_val, 'kp': kp, 'kd': kd}
         if mit_cmd:
             robot.controlMIT(mit_cmd)
+    
+    def send_gripper(left_val: float, right_val: float):
+        """发送夹爪控制命令(VR gripper值0-1映射到0-100百分比)"""
+        if not enable_real:
+            return
+        left_percent = np.clip(left_val * 100.0, 0.0, 100.0)
+        right_percent = np.clip(right_val * 100.0, 0.0, 100.0)
+        if left_gripper is not None:
+            left_gripper.controlMIT(percent=left_percent, kp=0.5, kd=0.05)
+        if right_gripper is not None:
+            right_gripper.controlMIT(percent=right_percent, kp=0.5, kd=0.05)
     
     # 初始化配置
     cfg.update_from_keyframe("home")
@@ -357,6 +372,7 @@ def main():
             
             # 发送到真机
             send_to_real(cfg.q, data.qfrc_bias)
+            send_gripper(vr_data.left_hand.gripper, vr_data.right_hand.gripper)
             
             print_counter += 1
             if print_counter >= 200:
