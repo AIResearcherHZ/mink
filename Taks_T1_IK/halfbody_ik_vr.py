@@ -41,12 +41,12 @@ JOINT_NAME_TO_SDK_ID = {
     "neck_yaw_joint": 20, "neck_roll_joint": 21, "neck_pitch_joint": 22,
 }
 
-# SDK关节默认KP/KD (与SDK_MF.py JOINT_CONFIG一致)
+# 全局关节默认KP/KD
 SDK_JOINT_GAINS = {
     1: (20.0, 2.0), 2: (20.0, 2.0), 3: (20.0, 2.0), 4: (20.0, 2.0),
-    5: (10.0, 1.0), 6: (10.0, 1.0), 7: (10.0, 1.0),
+    5: (10.0, 1.0), 6: (10.0, 1.0), 7: (10.0, 1.0), 8: (0.5, 0.05),
     9: (20.0, 2.0), 10: (20.0, 2.0), 11: (20.0, 2.0), 12: (20.0, 2.0),
-    13: (10.0, 1.0), 14: (10.0, 1.0), 15: (10.0, 1.0),
+    13: (10.0, 1.0), 14: (10.0, 1.0), 15: (10.0, 1.0), 16: (0.5, 0.05),
     17: (250.0, 5.0), 18: (250.0, 5.0), 19: (250.0, 5.0),
     20: (1.0, 0.5), 21: (1.0, 0.5), 22: (1.0, 0.5),
 }
@@ -246,9 +246,11 @@ def main():
         left_percent = np.clip(left_val * 100.0, 0.0, 100.0)
         right_percent = np.clip(right_val * 100.0, 0.0, 100.0)
         if left_gripper is not None:
-            left_gripper.controlMIT(percent=left_percent, kp=0.5, kd=0.05)
+            kp, kd = SDK_JOINT_GAINS.get(16, (0.5, 0.05))
+            left_gripper.controlMIT(percent=left_percent, kp=kp, kd=kd)
         if right_gripper is not None:
-            right_gripper.controlMIT(percent=right_percent, kp=0.5, kd=0.05)
+            kp, kd = SDK_JOINT_GAINS.get(8, (0.5, 0.05))
+            right_gripper.controlMIT(percent=right_percent, kp=kp, kd=kd)
     
     # 初始化配置
     cfg.update_from_keyframe("home")
