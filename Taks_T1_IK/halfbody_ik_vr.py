@@ -6,6 +6,7 @@
 
 import sys
 import argparse
+import signal
 from pathlib import Path
 import numpy as np
 import mujoco
@@ -13,6 +14,7 @@ import mujoco.viewer
 from loop_rate_limiters import RateLimiter
 import mink
 import threading
+import time
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "taks_sdk"))
@@ -50,6 +52,10 @@ SDK_JOINT_GAINS = {
     17: (250.0, 5.0), 18: (250.0, 5.0), 19: (250.0, 5.0),
     20: (1.0, 0.5), 21: (1.0, 0.5), 22: (1.0, 0.5),
 }
+
+# 缓启动配置
+RAMP_UP_TIME = 3.0
+TRANSITION_TIME = 1.5
 
 # 末端执行器: (link, mocap, limbs)
 END_EFFECTORS = {
@@ -114,6 +120,11 @@ def parse_args():
     parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
     parser.add_argument("--no-real", action="store_true", default=False, help="禁用真机控制(仅仿真)")
     return parser.parse_args()
+
+
+def ease_out(t: float) -> float:
+    """Ease-out曲线: 由快到慢, t in [0,1] -> [0,1]"""
+    return 1.0 - (1.0 - t) ** 2
 
 
 def main():
@@ -194,6 +205,12 @@ def main():
     reset_state = {"active": False, "alpha": 0.0, "start_q": None, "start_pos": {}, "start_quat": {}}
     # 运行状态
     running = True
+    shutdown_requested = False
+    
+    # 缓启动状态
+    ramp_state = {"active": True, "start_time": None, "kp_scale": 0.0}
+    # IK过渡状态
+    transition_state = {"active": False, "start_time": None, "start_q": None}
     
     def do_calibrate():
         vr_data = vr.data
@@ -223,8 +240,8 @@ def main():
         elif keycode == 67:  # C
             do_calibrate()
     
-    def send_to_real(q_arr, tau_arr):
-        """发送关节位置和前馈扭矩到真机"""
+    def send_to_real(q_arr, tau_arr, kp_scale=1.0):
+        """发送关节位置和前馈扭矩到真机，支持kp/kd缩放"""
         if not enable_real or robot is None:
             return
         mit_cmd = {}
@@ -235,7 +252,9 @@ def main():
             kp, kd = SDK_JOINT_GAINS.get(sdk_id, (10.0, 1.0))
             q_val = float(q_arr[qpos_idx]) if qpos_idx < len(q_arr) else 0.0
             tau_val = float(tau_arr[dof_idx]) if dof_idx < len(tau_arr) else 0.0
-            mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': tau_val, 'kp': kp, 'kd': kd}
+            # 应用kp/kd缩放
+            mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': tau_val * kp_scale, 
+                              'kp': kp * kp_scale, 'kd': kd * kp_scale}
         if mit_cmd:
             robot.controlMIT(mit_cmd)
     
@@ -279,11 +298,80 @@ def main():
     print(f"[Info] 模式: {mode_str}, {real_str}")
     print("[Info] 键盘: C=校准, Backspace=复位 | VR手柄: B双击=校准, A双击=复位")
     
+    def ramp_down():
+        """非线性缓关闭: kp/kd从当前值到0"""
+        if not enable_real or robot is None:
+            return
+        print(f"[Ramp Down] 缓关闭 ({RAMP_UP_TIME}s)...")
+        start = time.time()
+        init_scale = ramp_state["kp_scale"]
+        while time.time() - start < RAMP_UP_TIME:
+            elapsed = time.time() - start
+            t = elapsed / RAMP_UP_TIME
+            decay = 1.0 - ease_out(t)
+            scale = init_scale * decay
+            # 发送零位置命令
+            mit_cmd = {}
+            for jname, info in joint_mapping.items():
+                sdk_id = info['sdk_id']
+                kp, kd = SDK_JOINT_GAINS.get(sdk_id, (10.0, 1.0))
+                mit_cmd[sdk_id] = {'q': 0.0, 'dq': 0.0, 'tau': 0.0, 
+                                  'kp': kp * scale, 'kd': kd * scale}
+            if mit_cmd:
+                robot.controlMIT(mit_cmd)
+            time.sleep(0.02)
+        # 最终失能
+        mit_cmd = {}
+        for jname, info in joint_mapping.items():
+            sdk_id = info['sdk_id']
+            mit_cmd[sdk_id] = {'q': 0.0, 'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0}
+        if mit_cmd:
+            robot.controlMIT(mit_cmd)
+        print("[Ramp Down] 缓关闭完成")
+    
+    def signal_handler(signum, frame):
+        """信号处理: 确保先缓关闭再断开连接"""
+        nonlocal running, shutdown_requested
+        if shutdown_requested:
+            print("\n[强制退出]")
+            if enable_real:
+                taks.disconnect()
+            sys.exit(1)
+        print("\n[收到退出信号] 开始安全关闭...")
+        shutdown_requested = True
+        running = False
+    
+    # 注册信号处理
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     def control_loop(viewer=None):
         nonlocal print_counter, running
+        
+        # 初始化缓启动
+        ramp_state["start_time"] = time.time()
+        ramp_state["active"] = True
+        print(f"[Ramp Up] 缓启动 ({RAMP_UP_TIME}s)...")
+        
         while running:
             if viewer is not None and not viewer.is_running():
                 break
+            
+            # 缓启动处理
+            if ramp_state["active"]:
+                elapsed = time.time() - ramp_state["start_time"]
+                if elapsed >= RAMP_UP_TIME:
+                    ramp_state["active"] = False
+                    ramp_state["kp_scale"] = 1.0
+                    # 启动IK过渡
+                    transition_state["active"] = True
+                    transition_state["start_time"] = time.time()
+                    transition_state["start_q"] = cfg.q.copy()
+                    print("[Ramp Up] 缓启动完成，开始IK过渡...")
+                else:
+                    # 非线性ease-out曲线
+                    t = elapsed / RAMP_UP_TIME
+                    ramp_state["kp_scale"] = ease_out(t)
             
             vr_data = vr.data
             
@@ -372,8 +460,22 @@ def main():
             mujoco.mj_forward(model, data)
             data.qfrc_applied[:] = data.qfrc_bias[:]
             
+            # IK过渡处理：缓启动结束后的平滑过渡
+            if transition_state["active"]:
+                trans_elapsed = time.time() - transition_state["start_time"]
+                if trans_elapsed >= TRANSITION_TIME:
+                    transition_state["active"] = False
+                    print("[Transition] IK过渡完成")
+                else:
+                    # smoothstep过渡
+                    t = trans_elapsed / TRANSITION_TIME
+                    blend = t * t * (3.0 - 2.0 * t)
+                    # 混合初始位置和IK位置
+                    blended_q = (1.0 - blend) * transition_state["start_q"] + blend * cfg.q
+                    cfg.update(blended_q)
+            
             # 发送到真机
-            send_to_real(cfg.q, data.qfrc_bias)
+            send_to_real(cfg.q, data.qfrc_bias, ramp_state["kp_scale"])
             send_gripper(vr_data.left_hand.gripper, vr_data.right_hand.gripper)
             
             print_counter += 1
@@ -401,6 +503,7 @@ def main():
         running = False
         vr.stop()
         if enable_real:
+            ramp_down()
             taks.disconnect()
             print("[TAKS] 已断开")
 
