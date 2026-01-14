@@ -1,0 +1,943 @@
+"""
+DM Motor CAN FD Control Library
+基于 DM_CAN.py 串口版本改写，使用 SocketCAN 接口通信
+
+pip install python-can
+#使用以下指令把地瓜X5自带的can0接口用5M波特率启动
+sudo ip link set can0 up type can bitrate 1000000 dbitrate 5000000 fd on
+
+"""
+
+from time import sleep
+import time
+import csv
+import os
+from datetime import datetime
+import numpy as np
+from enum import IntEnum
+from struct import unpack, pack
+import can
+import threading
+
+# 关节软限位配置: joint_id -> (lower, upper) 单位: rad
+JOINT_POSITION_LIMITS = {
+    # 右臂 (right_hand CAN)
+    1: (-3.0892, 2.6704),      # right_shoulder_pitch
+    2: (-2.2515, 1.5882),   # right_shoulder_roll
+    3: (-2.618, 2.618),    # right_shoulder_yaw
+    4: (-0.7, 1.57),     # right_elbow
+    5: (-2.67, 2.67),    # right_wrist_roll
+    6: (-0.9, 0.9),      # right_wrist_yaw
+    7: (-0.9, 0.9),      # right_wrist_pitch
+    8: (0.0, 1.05),      # right_gripper
+    # 左臂 (left_hand CAN)
+    9: (-3.0892, 2.6704),      # left_shoulder_pitch
+    10: (-1.5882, 2.2515),  # left_shoulder_roll
+    11: (-2.618, 2.618),   # left_shoulder_yaw
+    12: (-0.7, 1.57),    # left_elbow
+    13: (-2.67, 2.67),   # left_wrist_roll
+    14: (-0.9, 0.9),     # left_wrist_yaw
+    15: (-0.9, 0.9),     # left_wrist_pitch
+    16: (0.0, 1.05),      # left_gripper
+    # 腰颈 (waist_neck CAN)
+    17: (-2.618, 2.618), # waist_yaw
+    18: (-0.52, 0.52),   # waist_roll
+    19: (-0.52, 0.52),   # waist_pitch
+    20: (-1.57, 1.57),   # neck_yaw
+    21: (-0.873, 0.873), # neck_roll
+    22: (-0.873, 0.873), # neck_pitch
+    # 右腿 (right_leg CAN)
+    23: (-2.5307, 2.8798),  # right_hip_pitch
+    24: (-2.9671, 0.5236),  # right_hip_roll
+    25: (-2.7576, 2.7576),  # right_hip_yaw
+    26: (-0.087267, 2.8798),# right_knee
+    27: (-0.87267, 0.5236), # right_ankle_pitch
+    28: (-0.2618, 0.2618),  # right_ankle_roll
+    # 左腿 (left_leg CAN)
+    29: (-2.5307, 2.8798),  # left_hip_pitch
+    30: (-0.5236, 2.9671),  # left_hip_roll
+    31: (-2.7576, 2.7576),  # left_hip_yaw
+    32: (-0.087267, 2.8798),# left_knee
+    33: (-0.87267, 0.5236), # left_ankle_pitch
+    34: (-0.2618, 0.2618),  # left_ankle_roll
+}
+
+# 固定的速度范围
+VEL_LIMIT = (-0.1, 0.1)
+
+# 需要反向的关节 (position, velocity, tau 都反向)
+REVERSED_JOINTS = {1, 3, 4, 7, 11, 12, 22, 23, 25, 27, 31, 32}
+
+# 力矩限位配置: joint_id -> (min_tau, max_tau) 单位: Nm
+JOINT_TAU_LIMITS = {
+    # 右臂 (right_hand CAN)
+    1: (-27.0, 27.0),    # right_shoulder_pitch
+    2: (-27.0, 27.0),    # right_shoulder_roll
+    3: (-27.0, 27.0),    # right_shoulder_yaw
+    4: (-27.0, 27.0),    # right_elbow
+    5: (-7.0, 7.0),      # right_wrist_roll
+    6: (-7.0, 7.0),      # right_wrist_yaw
+    7: (-7.0, 7.0),      # right_wrist_pitch
+    8: (-3.0, 3.0),      # right_gripper
+    # 左臂 (left_hand CAN)
+    9: (-27.0, 27.0),    # left_shoulder_pitch
+    10: (-27.0, 27.0),   # left_shoulder_roll
+    11: (-27.0, 27.0),   # left_shoulder_yaw
+    12: (-27.0, 27.0),   # left_elbow
+    13: (-7.0, 7.0),     # left_wrist_roll
+    14: (-7.0, 7.0),     # left_wrist_yaw
+    15: (-7.0, 7.0),     # left_wrist_pitch
+    16: (-3.0, 3.0),     # left_gripper
+    # 腰颈 (waist_neck CAN)
+    17: (-97.0, 97.0),   # waist_yaw
+    18: (-97.0, 97.0),   # waist_roll
+    19: (-97.0, 97.0),   # waist_pitch
+    20: (-3.0, 3.0),     # neck_yaw
+    21: (-3.0, 3.0),     # neck_roll
+    22: (-3.0, 3.0),     # neck_pitch
+    # 右腿 (right_leg CAN)
+    23: (-120.0, 120.0), # right_hip_pitch
+    24: (-97.0, 97.0),   # right_hip_roll
+    25: (-97.0, 97.0),   # right_hip_yaw
+    26: (-120.0, 120.0), # right_knee
+    27: (-27.0, 27.0),   # right_ankle_pitch
+    28: (-27.0, 27.0),   # right_ankle_roll
+    # 左腿 (left_leg CAN)
+    29: (-120.0, 120.0), # left_hip_pitch
+    30: (-97.0, 97.0),   # left_hip_roll
+    31: (-97.0, 97.0),   # left_hip_yaw
+    32: (-120.0, 120.0), # left_knee
+    33: (-27.0, 27.0),   # left_ankle_pitch
+    34: (-27.0, 27.0),   # left_ankle_roll
+}
+
+# 安全模式开关: False=普通模式, True=安全模式 (默认普通模式)
+SAFE_MODE = False
+
+# 普通模式：KP和KD限位配置: joint_id -> (max_kp, max_kd)
+JOINT_KP_KD_LIMITS_NORMAL = {
+    # 右臂 (right_hand CAN)
+    1: (20, 5),      # right_shoulder_pitch
+    2: (20, 5),      # right_shoulder_roll
+    3: (20, 5),      # right_shoulder_yaw
+    4: (20, 5),      # right_elbow
+    5: (10, 1),      # right_wrist_roll
+    6: (10, 1),      # right_wrist_yaw
+    7: (10, 1),      # right_wrist_pitch
+    8: (1.5, 0.1),      # right_gripper
+    # 左臂 (left_hand CAN)
+    9: (20, 5),      # left_shoulder_pitch
+    10: (20, 5),     # left_shoulder_roll
+    11: (20, 5),     # left_shoulder_yaw
+    12: (20, 5),     # left_elbow
+    13: (10, 1),     # left_wrist_roll
+    14: (10, 1),     # left_wrist_yaw
+    15: (10, 1),     # left_wrist_pitch
+    16: (1.5, 0.1),     # left_gripper
+    # 腰颈 (waist_neck CAN)
+    17: (150, 4),    # waist_yaw
+    18: (150, 4),    # waist_roll
+    19: (150, 4),    # waist_pitch
+    20: (1.5, 0.1),    # neck_yaw
+    21: (1.5, 0.1),    # neck_roll
+    22: (1.5, 0.1),    # neck_pitch
+    # 右腿 (right_leg CAN)
+    23: (50, 50),    # right_hip_pitch
+    24: (150, 50),   # right_hip_roll
+    25: (150, 50),   # right_hip_yaw
+    26: (50, 50),    # right_knee
+    27: (40, 2),     # right_ankle_pitch
+    28: (40, 2),     # right_ankle_roll
+    # 左腿 (left_leg CAN)
+    29: (50, 50),    # left_hip_pitch
+    30: (150, 50),   # left_hip_roll
+    31: (150, 50),   # left_hip_yaw
+    32: (50, 50),    # left_knee
+    33: (40, 2),     # left_ankle_pitch
+    34: (40, 2),     # left_ankle_roll
+}
+
+# 安全模式：KP和KD限位配置: joint_id -> (max_kp, max_kd)
+JOINT_KP_KD_LIMITS_SAFE = {
+    # 右臂 (right_hand CAN)
+    1: (5, 1),      # right_shoulder_pitch
+    2: (5, 1),      # right_shoulder_roll
+    3: (5, 1),      # right_shoulder_yaw
+    4: (5, 1),      # right_elbow
+    5: (2.5, 1),      # right_wrist_roll
+    6: (2.5, 1),      # right_wrist_yaw
+    7: (2.5, 1),      # right_wrist_pitch
+    8: (1.5, 0.1),      # right_gripper
+    # 左臂 (left_hand CAN)
+    9: (5, 1),      # left_shoulder_pitch
+    10: (5, 1),     # left_shoulder_roll
+    11: (5, 1),     # left_shoulder_yaw
+    12: (5, 1),     # left_elbow
+    13: (2.5, 1),     # left_wrist_roll
+    14: (2.5, 1),     # left_wrist_yaw
+    15: (2.5, 1),     # left_wrist_pitch
+    16: (1.5, 0.1),     # left_gripper
+    # 腰颈 (waist_neck CAN)
+    17: (10, 1),    # waist_yaw
+    18: (10, 1),    # waist_roll
+    19: (10, 1),    # waist_pitch
+    20: (1.5, 0.1),    # neck_yaw
+    21: (1.5, 0.1),    # neck_roll
+    22: (1.5, 0.1),    # neck_pitch
+    # 右腿 (right_leg CAN)
+    23: (50, 50),    # right_hip_pitch
+    24: (150, 50),   # right_hip_roll
+    25: (150, 50),   # right_hip_yaw
+    26: (50, 50),    # right_knee
+    27: (40, 2),     # right_ankle_pitch
+    28: (40, 2),     # right_ankle_roll
+    # 左腿 (left_leg CAN)
+    29: (50, 50),    # left_hip_pitch
+    30: (150, 50),   # left_hip_roll
+    31: (150, 50),   # left_hip_yaw
+    32: (50, 50),    # left_knee
+    33: (40, 2),     # left_ankle_pitch
+    34: (40, 2),     # left_ankle_roll
+}
+
+def get_kp_kd_limits():
+    """根据当前模式返回对应的KP/KD限位配置"""
+    return JOINT_KP_KD_LIMITS_SAFE if SAFE_MODE else JOINT_KP_KD_LIMITS_NORMAL
+
+def clamp_value(val: float, min_val: float, max_val: float) -> float:
+    """限制值在指定范围内"""
+    if val < min_val:
+        return min_val
+    if val > max_val:
+        return max_val
+    return val
+
+def apply_kp_kd_limits(joint_id: int, kp: float, kd: float) -> tuple:
+    """应用KP和KD限位"""
+    limits = get_kp_kd_limits()
+    if joint_id in limits:
+        max_kp, max_kd = limits[joint_id]
+        kp = clamp_value(kp, 0, max_kp)
+        kd = clamp_value(kd, 0, max_kd)
+    return kp, kd
+
+def apply_joint_limits(joint_id: int, q: float, dq: float, tau: float) -> tuple:
+    """应用关节软限位"""
+    if joint_id in JOINT_POSITION_LIMITS:
+        lower, upper = JOINT_POSITION_LIMITS[joint_id]
+        q = clamp_value(q, lower, upper)
+    dq = clamp_value(dq, VEL_LIMIT[0], VEL_LIMIT[1])
+    if joint_id in JOINT_TAU_LIMITS:
+        tau_min, tau_max = JOINT_TAU_LIMITS[joint_id]
+        tau = clamp_value(tau, tau_min, tau_max)
+    return q, dq, tau
+
+def apply_joint_direction(joint_id: int, q: float, dq: float, tau: float) -> tuple:
+    """应用关节方向反转 (发送命令时)"""
+    if joint_id in REVERSED_JOINTS:
+        return -q, -dq, -tau
+    return q, dq, tau
+
+def apply_feedback_direction(joint_id: int, q: float, dq: float, tau: float) -> tuple:
+    """应用关节方向反转 (接收反馈时)"""
+    if joint_id in REVERSED_JOINTS:
+        return -q, -dq, -tau
+    return q, dq, tau
+
+
+class Motor:
+    def __init__(self, MotorType, SlaveID, MasterID):
+        """
+        define Motor object 定义电机对象
+        :param MotorType: Motor type 电机类型
+        :param SlaveID: CANID 电机ID
+        :param MasterID: MasterID 主机ID 建议不要设为0
+        """
+        self.Pd = float(0)
+        self.Vd = float(0)
+        self.state_q = float(0)
+        self.state_dq = float(0)
+        self.state_tau = float(0)
+        self.SlaveID = SlaveID
+        self.MasterID = MasterID
+        self.MotorType = MotorType
+        self.isEnable = False
+        self.NowControlMode = Control_Type.MIT
+        self.temp_param_dict = {}
+
+    def recv_data(self, q: float, dq: float, tau: float):
+        self.state_q = q
+        self.state_dq = dq
+        self.state_tau = tau
+
+    def getPosition(self):
+        """
+        get the position of the motor 获取电机位置
+        :return: the position of the motor 电机位置
+        """
+        return self.state_q
+
+    def getVelocity(self):
+        """
+        get the velocity of the motor 获取电机速度
+        :return: the velocity of the motor 电机速度
+        """
+        return self.state_dq
+
+    def getTorque(self):
+        """
+        get the torque of the motor 获取电机力矩
+        :return: the torque of the motor 电机力矩
+        """
+        return self.state_tau
+
+    def getParam(self, RID):
+        """
+        get the parameter of the motor 获取电机内部的参数，需要提前读取
+        :param RID: DM_variable 电机参数
+        :return: the parameter of the motor 电机参数
+        """
+        if RID in self.temp_param_dict:
+            return self.temp_param_dict[RID]
+        else:
+            return None
+
+
+class MotorControlFD:
+    Limit_Param = [
+        [12.5,    30,  10],  # DM4310
+        [12.5,    50,  10],  # DM4310_48
+        [12.5,    10,  28],  # DM4340
+        [12.5,    10,  28],  # DM4340_48
+        [12.5,    45,  20],  # DM6006
+        [12.5,    45,  40],  # DM8006
+        [12.5,    45,  54],  # DM8009
+        [12.5,    25, 200],  # DM10010L
+        [12.5,    20, 200],  # DM10010
+        [12.5,   280,   1],  # DMH3510
+        [12.5,    45,  10],  # DMG6215
+        [12.5,    45,  10],  # DMH6220
+        [12.5 ,   10 , 12],  # DMJH11
+        [12.566,  20, 120],  # DM6248P
+        [12.566,  50,   5],  # DM3507
+    ]
+
+    def __init__(self, can_interface='can1', bitrate=5000000, log_dir="/home/taks-t1-controller/taks/logs/motor_logs"):
+        """
+        define MotorControl object 定义电机控制对象
+        :param can_interface: CAN interface name CAN接口名称 (默认 can1)
+        :param bitrate: CAN bitrate CAN波特率 (默认 5Mbps)
+        :param log_dir: 日志保存目录
+        """
+        self.can_interface = can_interface
+        self.bitrate = bitrate
+        self.motors_map = dict()
+        self.recv_buffer = []
+        self.recv_lock = threading.Lock()
+        self.running = False
+        self.recv_thread = None
+        
+        # CSV日志相关
+        self.log_dir = log_dir
+        os.makedirs(self.log_dir, exist_ok=True)
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.csv_file_path = os.path.join(self.log_dir, f"mit_control_{timestamp_str}.csv")
+        self._init_csv_log()
+        
+        # 初始化 CAN 总线
+        try:
+            self.bus = can.interface.Bus(
+                channel=can_interface,
+                bustype='socketcan',
+                fd=True,
+                bitrate=1000000,
+                data_bitrate=5000000,
+            )
+            print(f"CAN FD interface {can_interface} opened successfully with FD=True")
+            self.running = True
+            # 启动接收线程
+            self.recv_thread = threading.Thread(target=self._recv_thread_func, daemon=True)
+            self.recv_thread.start()
+        except Exception as e:
+            print(f"Failed to open CAN interface {can_interface}: {e}")
+            raise
+
+    def _init_csv_log(self):
+        """初始化CSV日志文件"""
+        with open(self.csv_file_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['timestamp', 'joint_id', 'kp', 'kd', 'q', 'dq', 'tau'])
+    
+    def _log_mit_control(self, joint_id, kp, kd, q, dq, tau):
+        """记录MIT控制数据到CSV"""
+        with open(self.csv_file_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([time.time(), joint_id, kp, kd, q, dq, tau])
+
+    def __del__(self):
+        """析构函数，关闭CAN总线"""
+        self.close()
+
+    def close(self):
+        """关闭CAN总线"""
+        self.running = False
+        if self.recv_thread and self.recv_thread.is_alive():
+            self.recv_thread.join(timeout=1.0)
+        if hasattr(self, 'bus') and self.bus:
+            self.bus.shutdown()
+            print(f"CAN interface {self.can_interface} closed")
+
+    def _recv_thread_func(self):
+        """接收线程函数"""
+        while self.running:
+            try:
+                msg = self.bus.recv(timeout=0.01)
+                if msg is not None:
+                    # print(f"DEBUG RECV: ID={hex(msg.arbitration_id)} data={msg.data.hex()}")
+                    with self.recv_lock:
+                        self.recv_buffer.append(msg)
+            except Exception as e:
+                if self.running:
+                    print(f"CAN recv error: {e}")
+
+    def controlMIT(self, DM_Motor, kp: float, kd: float, q: float, dq: float, tau: float):
+        """
+        MIT Control Mode Function 达妙电机MIT控制模式函数
+        :param DM_Motor: Motor object 电机对象
+        :param kp: kp
+        :param kd:  kd
+        :param q:  position  期望位置
+        :param dq:  velocity  期望速度（参数可输入但不起作用，始终为0）
+        :param tau: torque  期望力矩（参数可输入但不起作用，始终为0）
+        :return: None
+        """
+        if DM_Motor.SlaveID not in self.motors_map:
+            print("controlMIT ERROR : Motor ID not found")
+            return
+        # 应用KP和KD限位
+        kp, kd = apply_kp_kd_limits(DM_Motor.SlaveID, kp, kd)
+        # 应用关节软限位
+        q, dq, tau = apply_joint_limits(DM_Motor.SlaveID, q, dq, tau)
+        # 应用关节方向反转
+        q, dq, tau = apply_joint_direction(DM_Motor.SlaveID, q, dq, tau)
+        
+        kp_uint = float_to_uint(kp, 0, 500, 12)
+        kd_uint = float_to_uint(kd, 0, 5, 12)
+        MotorType = DM_Motor.MotorType
+        Q_MAX = self.Limit_Param[MotorType][0]
+        DQ_MAX = self.Limit_Param[MotorType][1]
+        TAU_MAX = self.Limit_Param[MotorType][2]
+        q_uint = float_to_uint(q, -Q_MAX, Q_MAX, 16)
+        dq_uint = float_to_uint(0, -DQ_MAX, DQ_MAX, 12)
+        tau_uint = float_to_uint(0, -TAU_MAX, TAU_MAX, 12)
+        data_buf = np.array([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], np.uint8)
+        data_buf[0] = (q_uint >> 8) & 0xff
+        data_buf[1] = q_uint & 0xff
+        data_buf[2] = dq_uint >> 4
+        data_buf[3] = ((dq_uint & 0xf) << 4) | ((kp_uint >> 8) & 0xf)
+        data_buf[4] = kp_uint & 0xff
+        data_buf[5] = kd_uint >> 4
+        data_buf[6] = ((kd_uint & 0xf) << 4) | ((tau_uint >> 8) & 0xf)
+        data_buf[7] = tau_uint & 0xff
+        self.__send_data(DM_Motor.SlaveID, data_buf)
+        self._log_mit_control(DM_Motor.SlaveID, kp, kd, q, dq, tau)
+        self.recv()  # receive the data from CAN bus
+
+    def control_delay(self, DM_Motor, kp: float, kd: float, q: float, dq: float, tau: float, delay: float):
+        """
+        MIT Control Mode Function with delay 达妙电机MIT控制模式函数带延迟
+        :param DM_Motor: Motor object 电机对象
+        :param kp: kp
+        :param kd: kd
+        :param q:  position  期望位置
+        :param dq:  velocity  期望速度
+        :param tau: torque  期望力矩
+        :param delay: delay time 延迟时间 单位秒
+        """
+        self.controlMIT(DM_Motor, kp, kd, q, dq, tau)
+        sleep(delay)
+
+    def control_Pos_Vel(self, Motor, P_desired: float, V_desired: float):
+        """
+        control the motor in position and velocity control mode 电机位置速度控制模式
+        :param Motor: Motor object 电机对象
+        :param P_desired: desired position 期望位置
+        :param V_desired: desired velocity 期望速度
+        :return: None
+        """
+        if Motor.SlaveID not in self.motors_map:
+            print("Control Pos_Vel Error : Motor ID not found")
+            return
+        motorid = 0x100 + Motor.SlaveID
+        data_buf = np.array([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], np.uint8)
+        P_desired_uint8s = float_to_uint8s(P_desired)
+        V_desired_uint8s = float_to_uint8s(V_desired)
+        data_buf[0:4] = P_desired_uint8s
+        data_buf[4:8] = V_desired_uint8s
+        self.__send_data(motorid, data_buf)
+        self.recv()  # receive the data from CAN bus
+
+    def control_Vel(self, Motor, Vel_desired):
+        """
+        control the motor in velocity control mode 电机速度控制模式
+        :param Motor: Motor object 电机对象
+        :param Vel_desired: desired velocity 期望速度
+        """
+        if Motor.SlaveID not in self.motors_map:
+            print("control_VEL ERROR : Motor ID not found")
+            return
+        motorid = 0x200 + Motor.SlaveID
+        data_buf = np.array([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], np.uint8)
+        Vel_desired_uint8s = float_to_uint8s(Vel_desired)
+        data_buf[0:4] = Vel_desired_uint8s
+        self.__send_data(motorid, data_buf)
+        self.recv()  # receive the data from CAN bus
+
+    def control_pos_force(self, Motor, Pos_des: float, Vel_des, i_des):
+        """
+        control the motor in EMIT control mode 电机力位混合模式
+        :param Pos_des: desired position rad  期望位置 单位为rad
+        :param Vel_des: desired velocity rad/s  期望速度 为放大100倍
+        :param i_des: desired current rang 0-10000 期望电流标幺值放大10000倍
+        电流标幺值：实际电流值除以最大电流值，最大电流见上电打印
+        """
+        if Motor.SlaveID not in self.motors_map:
+            print("control_pos_vel ERROR : Motor ID not found")
+            return
+        motorid = 0x300 + Motor.SlaveID
+        data_buf = np.array([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], np.uint8)
+        Pos_desired_uint8s = float_to_uint8s(Pos_des)
+        data_buf[0:4] = Pos_desired_uint8s
+        Vel_uint = np.uint16(Vel_des)
+        ides_uint = np.uint16(i_des)
+        data_buf[4] = Vel_uint & 0xff
+        data_buf[5] = Vel_uint >> 8
+        data_buf[6] = ides_uint & 0xff
+        data_buf[7] = ides_uint >> 8
+        self.__send_data(motorid, data_buf)
+        self.recv()  # receive the data from CAN bus
+
+    def enable(self, Motor):
+        """
+        enable motor 使能电机
+        最好在上电后几秒后再使能电机
+        :param Motor: Motor object 电机对象
+        """
+        self.__control_cmd(Motor, np.uint8(0xFC))
+        sleep(0.1)
+        self.recv()  # receive the data from CAN bus
+
+    def enable_old(self, Motor, ControlMode):
+        """
+        enable motor old firmware 使能电机旧版本固件，这个是为了旧版本电机固件的兼容性
+        可恶的旧版本固件使能需要加上偏移量
+        最好在上电后几秒后再使能电机
+        :param Motor: Motor object 电机对象
+        """
+        data_buf = np.array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfc], np.uint8)
+        enable_id = ((int(ControlMode) - 1) << 2) + Motor.SlaveID
+        self.__send_data(enable_id, data_buf)
+        sleep(0.1)
+        self.recv()  # receive the data from CAN bus
+
+    def disable(self, Motor):
+        """
+        disable motor 失能电机
+        :param Motor: Motor object 电机对象
+        """
+        self.__control_cmd(Motor, np.uint8(0xFD))
+        sleep(0.1)
+        self.recv()  # receive the data from CAN bus
+
+    def set_zero_position(self, Motor):
+        """
+        set the zero position of the motor 设置电机0位
+        :param Motor: Motor object 电机对象
+        """
+        self.__control_cmd(Motor, np.uint8(0xFE))
+        sleep(0.1)
+        self.recv()  # receive the data from CAN bus
+
+    def recv(self):
+        """处理接收缓冲区中的数据"""
+        with self.recv_lock:
+            messages = self.recv_buffer.copy()
+            self.recv_buffer.clear()
+        
+        for msg in messages:
+            self.__process_packet(msg.data, msg.arbitration_id)
+
+    def recv_set_param_data(self):
+        """处理参数设置的返回数据"""
+        with self.recv_lock:
+            messages = self.recv_buffer.copy()
+            self.recv_buffer.clear()
+        
+        for msg in messages:
+            self.__process_set_param_packet(msg.data, msg.arbitration_id)
+
+    def __process_packet(self, data, CANID):
+        if CANID != 0x00:
+            if CANID in self.motors_map:
+                q_uint = np.uint16((np.uint16(data[1]) << 8) | data[2])
+                dq_uint = np.uint16((np.uint16(data[3]) << 4) | (data[4] >> 4))
+                tau_uint = np.uint16(((data[4] & 0xf) << 8) | data[5])
+                MotorType_recv = self.motors_map[CANID].MotorType
+                Q_MAX = self.Limit_Param[MotorType_recv][0]
+                DQ_MAX = self.Limit_Param[MotorType_recv][1]
+                TAU_MAX = self.Limit_Param[MotorType_recv][2]
+                recv_q = uint_to_float(q_uint, -Q_MAX, Q_MAX, 16)
+                recv_dq = uint_to_float(dq_uint, -DQ_MAX, DQ_MAX, 12)
+                recv_tau = uint_to_float(tau_uint, -TAU_MAX, TAU_MAX, 12)
+                # 应用反馈方向反转
+                slave_id = self.motors_map[CANID].SlaveID
+                recv_q, recv_dq, recv_tau = apply_feedback_direction(slave_id, recv_q, recv_dq, recv_tau)
+                self.motors_map[CANID].recv_data(recv_q, recv_dq, recv_tau)
+        else:
+            MasterID = data[0] & 0x0f
+            if MasterID in self.motors_map:
+                q_uint = np.uint16((np.uint16(data[1]) << 8) | data[2])
+                dq_uint = np.uint16((np.uint16(data[3]) << 4) | (data[4] >> 4))
+                tau_uint = np.uint16(((data[4] & 0xf) << 8) | data[5])
+                MotorType_recv = self.motors_map[MasterID].MotorType
+                Q_MAX = self.Limit_Param[MotorType_recv][0]
+                DQ_MAX = self.Limit_Param[MotorType_recv][1]
+                TAU_MAX = self.Limit_Param[MotorType_recv][2]
+                recv_q = uint_to_float(q_uint, -Q_MAX, Q_MAX, 16)
+                recv_dq = uint_to_float(dq_uint, -DQ_MAX, DQ_MAX, 12)
+                recv_tau = uint_to_float(tau_uint, -TAU_MAX, TAU_MAX, 12)
+                # 应用反馈方向反转
+                slave_id = self.motors_map[MasterID].SlaveID
+                recv_q, recv_dq, recv_tau = apply_feedback_direction(slave_id, recv_q, recv_dq, recv_tau)
+                self.motors_map[MasterID].recv_data(recv_q, recv_dq, recv_tau)
+
+    def __process_set_param_packet(self, data, CANID):
+        if len(data) < 8:
+            return
+        if data[2] == 0x33 or data[2] == 0x55:
+            masterid = CANID
+            slaveId = ((data[1] << 8) | data[0])
+            if CANID == 0x00:  # 防止有人把MasterID设为0稳一手
+                masterid = slaveId
+
+            if masterid not in self.motors_map:
+                if slaveId not in self.motors_map:
+                    return
+                else:
+                    masterid = slaveId
+
+            RID = data[3]
+            # 读取参数得到的数据
+            if is_in_ranges(RID):
+                # uint32类型
+                num = uint8s_to_uint32(data[4], data[5], data[6], data[7])
+                self.motors_map[masterid].temp_param_dict[RID] = num
+            else:
+                # float类型
+                num = uint8s_to_float(data[4], data[5], data[6], data[7])
+                self.motors_map[masterid].temp_param_dict[RID] = num
+
+    def addMotor(self, Motor):
+        """
+        add motor to the motor control object 添加电机到电机控制对象
+        :param Motor: Motor object 电机对象
+        """
+        self.motors_map[Motor.SlaveID] = Motor
+        if Motor.MasterID != 0:
+            self.motors_map[Motor.MasterID] = Motor
+        return True
+
+    def __control_cmd(self, Motor, cmd: np.uint8):
+        data_buf = np.array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, cmd], np.uint8)
+        self.__send_data(Motor.SlaveID, data_buf)
+
+    def __send_data(self, motor_id, data):
+        """
+        send data to the motor 发送数据到电机
+        :param motor_id: CAN ID
+        :param data: 8 bytes data
+        """
+        msg = can.Message(
+            arbitration_id=motor_id,
+            data=bytes(data),
+            is_extended_id=False
+        )
+        try:
+            self.bus.send(msg)
+        except can.CanError as e:
+            print(f"CAN send error: {e}")
+
+    def __read_RID_param(self, Motor, RID):
+        can_id_l = Motor.SlaveID & 0xff  # id low 8 bits
+        can_id_h = (Motor.SlaveID >> 8) & 0xff  # id high 8 bits
+        data_buf = np.array([np.uint8(can_id_l), np.uint8(can_id_h), 0x33, np.uint8(RID), 0x00, 0x00, 0x00, 0x00],
+                            np.uint8)
+        self.__send_data(0x7FF, data_buf)
+
+    def __write_motor_param(self, Motor, RID, data):
+        can_id_l = Motor.SlaveID & 0xff  # id low 8 bits
+        can_id_h = (Motor.SlaveID >> 8) & 0xff  # id high 8 bits
+        data_buf = np.array([np.uint8(can_id_l), np.uint8(can_id_h), 0x55, np.uint8(RID), 0x00, 0x00, 0x00, 0x00],
+                            np.uint8)
+        if not is_in_ranges(RID):
+            # data is float
+            data_buf[4:8] = float_to_uint8s(data)
+        else:
+            # data is int
+            data_buf[4:8] = data_to_uint8s(int(data))
+        self.__send_data(0x7FF, data_buf)
+
+    def switchControlMode(self, Motor, ControlMode):
+        """
+        switch the control mode of the motor 切换电机控制模式
+        :param Motor: Motor object 电机对象
+        :param ControlMode: Control_Type 电机控制模式 example:MIT:Control_Type.MIT MIT模式
+        """
+        max_retries = 20
+        retry_interval = 0.1  # retry times
+        RID = 10
+        self.__write_motor_param(Motor, RID, np.uint8(ControlMode))
+        for _ in range(max_retries):
+            sleep(retry_interval)
+            self.recv_set_param_data()
+            if Motor.SlaveID in self.motors_map:
+                if RID in self.motors_map[Motor.SlaveID].temp_param_dict:
+                    if abs(self.motors_map[Motor.SlaveID].temp_param_dict[RID] - ControlMode) < 0.1:
+                        return True
+                    else:
+                        return False
+        return False
+
+    def save_motor_param(self, Motor):
+        """
+        save the all parameter  to flash 保存所有电机参数
+        :param Motor: Motor object 电机对象
+        :return:
+        """
+        can_id_l = Motor.SlaveID & 0xff  # id low 8 bits
+        can_id_h = (Motor.SlaveID >> 8) & 0xff  # id high 8 bits
+        data_buf = np.array([np.uint8(can_id_l), np.uint8(can_id_h), 0xAA, 0x00, 0x00, 0x00, 0x00, 0x00], np.uint8)
+        self.disable(Motor)  # before save disable the motor
+        self.__send_data(0x7FF, data_buf)
+        sleep(0.001)
+
+    def change_limit_param(self, Motor_Type, PMAX, VMAX, TMAX):
+        """
+        change the PMAX VMAX TMAX of the motor 改变电机的PMAX VMAX TMAX
+        :param Motor_Type:
+        :param PMAX: 电机的PMAX
+        :param VMAX: 电机的VMAX
+        :param TMAX: 电机的TMAX
+        :return:
+        """
+        self.Limit_Param[Motor_Type][0] = PMAX
+        self.Limit_Param[Motor_Type][1] = VMAX
+        self.Limit_Param[Motor_Type][2] = TMAX
+
+    def refresh_motor_status(self, Motor):
+        """
+        get the motor status 获得电机状态
+        """
+        can_id_l = Motor.SlaveID & 0xff  # id low 8 bits
+        can_id_h = (Motor.SlaveID >> 8) & 0xff  # id high 8 bits
+        data_buf = np.array([np.uint8(can_id_l), np.uint8(can_id_h), 0xCC, 0x00, 0x00, 0x00, 0x00, 0x00], np.uint8)
+        self.__send_data(0x7FF, data_buf)
+        self.recv()  # receive the data from CAN bus
+
+    def change_motor_param(self, Motor, RID, data):
+        """
+        change the RID of the motor 改变电机的参数
+        :param Motor: Motor object 电机对象
+        :param RID: DM_variable 电机参数
+        :param data: 电机参数的值
+        :return: True or False ,True means success, False means fail
+        """
+        max_retries = 20
+        retry_interval = 0.05  # retry times
+
+        self.__write_motor_param(Motor, RID, data)
+        for _ in range(max_retries):
+            self.recv_set_param_data()
+            if Motor.SlaveID in self.motors_map and RID in self.motors_map[Motor.SlaveID].temp_param_dict:
+                if abs(self.motors_map[Motor.SlaveID].temp_param_dict[RID] - data) < 0.1:
+                    return True
+                else:
+                    return False
+            sleep(retry_interval)
+        return False
+
+    def read_motor_param(self, Motor, RID):
+        """
+        read only the RID of the motor 读取电机的内部信息例如 版本号等
+        :param Motor: Motor object 电机对象
+        :param RID: DM_variable 电机参数
+        :return: 电机参数的值
+        """
+        max_retries = 20
+        retry_interval = 0.05  # retry times
+        self.__read_RID_param(Motor, RID)
+        for _ in range(max_retries):
+            sleep(retry_interval)
+            self.recv_set_param_data()
+            if Motor.SlaveID in self.motors_map:
+                if RID in self.motors_map[Motor.SlaveID].temp_param_dict:
+                    return self.motors_map[Motor.SlaveID].temp_param_dict[RID]
+        return None
+
+
+# ==================== 辅助函数 ====================
+
+def LIMIT_MIN_MAX(x, min, max):
+    if x <= min:
+        return min
+    elif x > max:
+        return max
+    return x
+
+
+def float_to_uint(x: float, x_min: float, x_max: float, bits):
+    LIMIT_MIN_MAX(x, x_min, x_max)
+    span = x_max - x_min
+    data_norm = (x - x_min) / span
+    return np.uint16(data_norm * ((1 << bits) - 1))
+
+
+def uint_to_float(x: np.uint16, min: float, max: float, bits):
+    span = max - min
+    data_norm = float(x) / ((1 << bits) - 1)
+    temp = data_norm * span + min
+    return np.float32(temp)
+
+
+def float_to_uint8s(value):
+    # Pack the float into 4 bytes
+    packed = pack('f', value)
+    # Unpack the bytes into four uint8 values
+    return unpack('4B', packed)
+
+
+def data_to_uint8s(value):
+    # Check if the value is within the range of uint32
+    if isinstance(value, int) and (0 <= value <= 0xFFFFFFFF):
+        # Pack the uint32 into 4 bytes
+        packed = pack('I', value)
+    else:
+        raise ValueError("Value must be an integer within the range of uint32")
+
+    # Unpack the bytes into four uint8 values
+    return unpack('4B', packed)
+
+
+def is_in_ranges(number):
+    """
+    check if the number is in the range of uint32
+    :param number:
+    :return:
+    """
+    if (7 <= number <= 10) or (13 <= number <= 16) or (35 <= number <= 36):
+        return True
+    return False
+
+
+def uint8s_to_uint32(byte1, byte2, byte3, byte4):
+    # Pack the four uint8 values into a single uint32 value in little-endian order
+    packed = pack('<4B', byte1, byte2, byte3, byte4)
+    # Unpack the packed bytes into a uint32 value
+    return unpack('<I', packed)[0]
+
+
+def uint8s_to_float(byte1, byte2, byte3, byte4):
+    # Pack the four uint8 values into a single float value in little-endian order
+    packed = pack('<4B', byte1, byte2, byte3, byte4)
+    # Unpack the packed bytes into a float value
+    return unpack('<f', packed)[0]
+
+
+def print_hex(data):
+    hex_values = [f'{byte:02X}' for byte in data]
+    print(' '.join(hex_values))
+
+
+def get_enum_by_index(index, enum_class):
+    try:
+        return enum_class(index)
+    except ValueError:
+        return None
+
+
+# ==================== 枚举类型 ====================
+
+class DM_Motor_Type(IntEnum):
+    DM4310 = 0
+    DM4310_48V = 1
+    DM4340 = 2
+    DM4340_48V = 3
+    DM6006 = 4
+    DM8006 = 5
+    DM8009 = 6
+    DM10010L = 7
+    DM10010 = 8
+    DMH3510 = 9
+    DMH6215 = 10
+    DMG6220 = 11
+    DMJH11 = 12
+    DM6248P = 13
+    DM3507 = 14
+
+
+class DM_variable(IntEnum):
+    UV_Value = 0      # 欠压值 (Under Voltage threshold)
+    KT_Value = 1      # 转矩常数或相关校准系数 (Torque constant / calibration)
+    OT_Value = 2      # 过温阈值 (Over Temperature threshold)
+    OC_Value = 3      # 过流阈值 (Over Current threshold)
+    ACC = 4           # 加速时间或加速度设定 (Acceleration)
+    DEC = 5           # 减速时间或减速度设定 (Deceleration)
+    MAX_SPD = 6       # 最大速度 (Maximum speed)
+    MST_ID = 7        # 主设备/主控 ID (Master ID)
+    ESC_ID = 8        # 从设备或 ESC（电子调速器）ID (ESC / slave ID)
+    TIMEOUT = 9       # 通信或动作超时时间 (Timeout duration)
+    CTRL_MODE = 10    # 控制模式（例如速度/转矩/位置）(Control mode)
+    Damp = 11         # 阻尼系数 (Damping)
+    Inertia = 12      # 惯量参数 (Inertia)
+    hw_ver = 13       # 硬件版本号 (Hardware version)
+    sw_ver = 14       # 软件版本号 (Software/firmware version)
+    SN = 15           # 设备序列号 (Serial Number)
+    NPP = 16          # 每转脉冲数或编码器分辨率 (Number of pulses per revolution)
+    Rs = 17           # 定子电阻 (Stator resistance Rs)
+    LS = 18           # 电感量或定子电感 (Stator inductance Ls)
+    Flux = 19         # 磁通或磁链值 (Flux linkage)
+    Gr = 20           # 减速比或齿轮比 (Gear ratio)
+    PMAX = 21         # 最大功率 (Maximum power)
+    VMAX = 22         # 最大电压或速度上限 (Maximum voltage/speed limit)
+    TMAX = 23         # 最大扭矩/温度阈值 (Maximum torque/temperature)
+    I_BW = 24         # 电流带宽（环路带宽）(Current loop bandwidth)
+    KP_ASR = 25       # ASR 回路比例增益 Kp (Proportional gain for ASR)
+    KI_ASR = 26       # ASR 回路积分增益 Ki (Integral gain for ASR)
+    KP_APR = 27       # APR 回路比例增益 Kp (Proportional gain for APR)
+    KI_APR = 28       # APR 回路积分增益 Ki (Integral gain for APR)
+    OV_Value = 29     # 过压阈值 (Over Voltage threshold)
+    GREF = 30         # 参考频率/参考增益 (Reference gain or frequency)
+    Deta = 31         # 微小偏差值或增量 (Delta / small offset)
+    V_BW = 32         # 速度环带宽 (Velocity loop bandwidth)
+    IQ_c1 = 33        # 电流或电流限制相关参数 IQ_c1 (Current-related constant)
+    VL_c1 = 34        # 速度或电压相关常数 VL_c1 (Velocity/voltage constant)
+    can_br = 35       # CAN 总线波特率或配置 (CAN bus baud rate)
+    sub_ver = 36      # 子版本号 (Sub-version)
+    u_off = 50        # U 相偏置/电压偏移 (Phase U offset)
+    v_off = 51        # V 相偏置/电压偏移 (Phase V offset)
+    k1 = 52           # 校准系数 k1 (Calibration coefficient)
+    k2 = 53           # 校准系数 k2 (Calibration coefficient)
+    m_off = 54        # 机械偏移或位置偏移 (Mechanical offset)
+    dir = 55          # 旋转方向（正/反）(Direction)
+    p_m = 80          # 极对数或机械极数 (Pole pairs / mechanical poles)
+    xout = 81         # 外部输出或诊断输出寄存器 (External output / diagnostic output)
+
+
+class Control_Type(IntEnum):
+    MIT = 1
+    POS_VEL = 2
+    VEL = 3
+    Torque_Pos = 4
+    POS_VEL_CSP = 5
+    VEL_CSP = 6
+    Torque_CSP = 7

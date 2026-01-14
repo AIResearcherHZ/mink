@@ -7,6 +7,7 @@
 import sys
 import argparse
 import signal
+import subprocess
 from pathlib import Path
 import numpy as np
 import mujoco
@@ -135,12 +136,42 @@ def parse_args():
     return parser.parse_args()
 
 
+def start_local_sdk():
+    """启动本机SDK服务端子进程"""
+    sdk_path = Path(__file__).parent / "taks_sdk" / "SDK.py"
+    if not sdk_path.exists():
+        print(f"[SDK] 错误: SDK.py 不存在: {sdk_path}")
+        return None
+    print(f"[SDK] 本机模式: 启动 SDK 服务端...")
+    proc = subprocess.Popen(
+        [sys.executable, str(sdk_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=str(sdk_path.parent)
+    )
+    time.sleep(3.0)  # 等待SDK初始化
+    if proc.poll() is not None:
+        print(f"[SDK] 错误: SDK 服务端启动失败")
+        return None
+    print(f"[SDK] SDK 服务端已启动 (PID: {proc.pid})")
+    return proc
+
+
 
 
 def main():
     args = parse_args()
     headless = args.headless
     enable_real = not args.no_real
+    
+    # 本机模式: 自动启动SDK服务端
+    sdk_proc = None
+    is_local = args.host in ("127.0.0.1", "localhost") and enable_real
+    if is_local:
+        sdk_proc = start_local_sdk()
+        if sdk_proc is None:
+            print("[SDK] 本机SDK启动失败，切换到仅仿真模式")
+            enable_real = False
     
     model = mujoco.MjModel.from_xml_path(_XML.as_posix())
     cfg = mink.Configuration(model)
@@ -556,6 +587,15 @@ def main():
             ramp_down()
             taks.disconnect()
             print("[TAKS] 已断开")
+        # 清理本机SDK子进程
+        if sdk_proc is not None:
+            print("[SDK] 关闭本机SDK服务端...")
+            sdk_proc.terminate()
+            try:
+                sdk_proc.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                sdk_proc.kill()
+            print("[SDK] SDK服务端已关闭")
 
 
 if __name__ == "__main__":
