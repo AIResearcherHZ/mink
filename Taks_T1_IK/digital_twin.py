@@ -111,6 +111,58 @@ SAFE_FALL_POSITIONS = {
     19: -0.20, # waist_pitch: 微向后倒
 }
 
+# 安全模式 kp/kd (缓停止结束时的目标值)
+SAFE_KP_KD = {
+    1: (5.0, 1.0), 2: (5.0, 1.0), 3: (5.0, 1.0), 4: (5.0, 1.0),
+    5: (5.0, 1.0), 6: (5.0, 1.0), 7: (5.0, 1.0), 8: (2.0, 0.2),
+    9: (5.0, 1.0), 10: (5.0, 1.0), 11: (5.0, 1.0), 12: (5.0, 1.0),
+    13: (5.0, 1.0), 14: (5.0, 1.0), 15: (5.0, 1.0), 16: (2.0, 0.2),
+    17: (40.0, 2.0), 18: (40.0, 2.0), 19: (40.0, 2.0),
+    20: (1.0, 0.5), 21: (1.0, 0.5), 22: (1.0, 0.5),
+    # 腿部关节
+    23: (20.0, 2.0), 24: (20.0, 2.0), 25: (20.0, 2.0),
+    26: (20.0, 2.0), 27: (10.0, 1.0), 28: (10.0, 1.0),
+    29: (20.0, 2.0), 30: (20.0, 2.0), 31: (20.0, 2.0),
+    32: (20.0, 2.0), 33: (10.0, 1.0), 34: (10.0, 1.0),
+}
+
+# 非线性缓动参数 (可调)
+
+# 作用: 控制 kp/kd 增益在 ramp up/down 过程中的变化曲线
+# - Ramp Up (缓启动): kp/kd 从 0 渐变到目标值，使电机平滑启动
+# - Ramp Down (缓停止): kp/kd 从当前值渐变到安全值，使电机平滑停止
+
+# RAMP_EXPONENT 参数说明（形象理解）:
+# - 值越大，曲线越弯曲，过渡越平滑
+# - = 1.0: 线性变化，像“匀速走路”
+# - = 2.0: 默认，开始稍快、尾部渐缓
+# - = 3.0: 开始更快、后段更柔，像“先迅速起步再慢慢刹车”
+
+# Ramp Up (ease_out): **开始更快，后面放缓**
+#   - 增大 exponent → kp/kd 前半段冲得更快，越接近目标越慢，避免突然“硬”起来
+# Ramp Down (ease_in): **开始更慢，后面更快**
+#   - 增大 exponent → kp/kd 前半段降得更慢，越接近结束越快归零/安全值，避免“突然塌陷”
+
+RAMP_EXPONENT = 2.0  # 调参: 增大此值使曲线更弯
+
+def ease_out(t: float, exp: float = RAMP_EXPONENT) -> float:
+    """缓出函数: 开始快，结束慢 (用于 ramp up)
+    t: 进度 [0,1]
+    exp: 指数，越大曲线越弯
+    返回: 输出 [0,1]
+    公式: 1 - (1-t)^exp
+    """
+    return 1.0 - pow(1.0 - t, exp)
+
+def ease_in(t: float, exp: float = RAMP_EXPONENT) -> float:
+    """缓入函数: 开始慢，结束快 (用于 ramp down)
+    t: 进度 [0,1]
+    exp: 指数，越大曲线越弯
+    返回: 输出 [0,1]
+    公式: t^exp
+    """
+    return pow(t, exp)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="MuJoCo数字孪生")
@@ -128,15 +180,15 @@ def parse_args():
 
 def start_local_sdk():
     """启动本机SDK服务端子进程"""
-    sdk_path = Path(__file__).parent / "taks_sdk" / "SDK.py"
+    sdk_path = Path(__file__).parent / "taks_sdk" / "SDK_MF.py"
     if not sdk_path.exists():
-        print(f"[SDK] 错误: SDK.py 不存在: {sdk_path}")
+        print(f"[SDK] 错误: SDK_MF.py 不存在: {sdk_path}")
         return None
     print(f"[SDK] 本机模式: 启动 SDK 服务端...")
     proc = subprocess.Popen(
         [sys.executable, str(sdk_path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stdout=None,  # 继承父进程的stdout，显示输出
+        stderr=None,  # 继承父进程的stderr
         cwd=str(sdk_path.parent)
     )
     time.sleep(3.0)  # 等待SDK初始化
@@ -249,35 +301,49 @@ def main():
         jname, qpos_idx, sdk_id = joint_info[idx]
         print(f"[{idx+1}/{len(joint_info)}] {jname} (SDK:{sdk_id}) = {data.qpos[qpos_idx]:.4f}")
     
-    def get_real_positions():
-        """获取真机当前位置"""
+    def get_real_positions(timeout: float = 2.0):
+        """获取真机当前位置，等待有效数据
+        timeout: 等待超时时间(秒)，超时后返回0
+        """
         if not enable_real or robot is None:
             return {sdk_id: 0.0 for _, _, sdk_id in joint_info}
-        real_pos = robot.GetPosition()
-        if real_pos is None:
-            return {sdk_id: 0.0 for _, _, sdk_id in joint_info}
-        return {sdk_id: real_pos.get(sdk_id, 0.0) for _, _, sdk_id in joint_info}
+        
+        # 等待有效数据
+        start = time.time()
+        while time.time() - start < timeout:
+            real_pos = robot.GetPosition()
+            if real_pos is not None and len(real_pos) > 0:
+                return {sdk_id: real_pos.get(sdk_id, 0.0) for _, _, sdk_id in joint_info}
+            time.sleep(0.05)  # 20Hz轮询
+        
+        print(f"[警告] 获取真机位置超时({timeout}s)，使用0作为起始位置")
+        return {sdk_id: 0.0 for _, _, sdk_id in joint_info}
     
     def send_to_real(ramp_progress=1.0):
-        """发送当前MuJoCo关节位置到真机"""
+        """发送当前MuJoCo关节位置到真机
+        ramp_progress: 启动进度[0,1]，用于非线性kp/kd渐变
+        - ramp up: kp/kd 从0非线性(ease_out:越来越慢)增加到目标值
+        - 正常运行: ramp_progress=1.0, 使用完整kp/kd
+        """
         if not enable_real or robot is None:
             return
         mit_cmd = {}
+        # 非线性kp/kd缩放因子 (ease_out: 开始快，结束慢)
+        kp_kd_scale = ease_out(ramp_progress) if ramp_progress < 1.0 else 1.0
         for jname, qpos_idx, sdk_id in joint_info:
             q_target = float(data.qpos[qpos_idx])
-            kp, kd = SDK_GAINS.get(sdk_id, (10.0, 1.0))
-            # 启动阶段: 从真机起始位置线性插值到目标位置
-            if ramp_progress < 1.0:
-                start_pos = ramp_state["start_positions"].get(sdk_id, 0.0)
-                q_val = start_pos + (q_target - start_pos) * ramp_progress
-            else:
-                q_val = q_target
-            mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': 0.0, 'kp': kp, 'kd': kd}
+            kp_target, kd_target = SDK_GAINS.get(sdk_id, (10.0, 1.0))
+            # 启动阶段: kp/kd非线性渐变，位置直接发送目标位置
+            kp_val = kp_target * kp_kd_scale
+            kd_val = kd_target * kp_kd_scale
+            mit_cmd[sdk_id] = {'q': q_target, 'dq': 0.0, 'tau': 0.0, 'kp': kp_val, 'kd': kd_val}
         if mit_cmd:
             robot.controlMIT(mit_cmd)
     
     def ramp_down():
-        """安全停止: 从真机当前位置线性移动到安全倒向位置，然后失能"""
+        """安全停止: kp/kd非线性(ease_in:越来越快)从目标值降低到安全值，然后失能
+        使用 ease_in 函数: 开始慢，结束快
+        """
         if not enable_real or robot is None:
             return
         if not enable_ramp_down:
@@ -287,27 +353,33 @@ def main():
             print("[Ramp Down] 缓停止已禁用，直接失能")
             return
         
-        print(f"[Ramp Down] 线性移动到安全位置 ({ramp_down_time}s)...")
+        print(f"[Ramp Down] 非线性降低kp/kd到安全值 ({ramp_down_time}s)...")
         start = time.time()
         start_positions = get_real_positions()
         
         while time.time() - start < ramp_down_time:
             elapsed = time.time() - start
             t = elapsed / ramp_down_time  # 线性进度 [0,1]
+            # 非线性kp/kd缩放因子 (ease_in: 开始慢，结束快)
+            # t=0时 scale=1(目标kp/kd), t=1时 scale=0(安全kp/kd)
+            kp_kd_scale = 1.0 - ease_in(t)
             mit_cmd = {}
             for jname, qpos_idx, sdk_id in joint_info:
-                kp, kd = SDK_GAINS.get(sdk_id, (10.0, 1.0))
-                start_pos = start_positions.get(sdk_id, 0.0)
-                target_pos = SAFE_FALL_POSITIONS.get(sdk_id, 0.0)
-                q_val = start_pos + (target_pos - start_pos) * t
-                mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': 0.0, 'kp': kp, 'kd': kd}
+                kp_target, kd_target = SDK_GAINS.get(sdk_id, (10.0, 1.0))
+                kp_safe, kd_safe = SAFE_KP_KD.get(sdk_id, (5.0, 1.0))
+                # kp/kd从目标值渐变到安全值
+                kp_val = kp_safe + (kp_target - kp_safe) * kp_kd_scale
+                kd_val = kd_safe + (kd_target - kd_safe) * kp_kd_scale
+                # 位置保持当前位置
+                q_val = start_positions.get(sdk_id, 0.0)
+                mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': 0.0, 'kp': kp_val, 'kd': kd_val}
             if mit_cmd:
                 robot.controlMIT(mit_cmd)
             time.sleep(0.005)  # 200Hz
-        # 到达安全位置后失能
-        mit_cmd = {sdk_id: {'q': SAFE_FALL_POSITIONS.get(sdk_id, 0.0), 'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0} for _, _, sdk_id in joint_info}
+        # 到达安全kp/kd后失能
+        mit_cmd = {sdk_id: {'q': start_positions.get(sdk_id, 0.0), 'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0} for _, _, sdk_id in joint_info}
         robot.controlMIT(mit_cmd)
-        print("[Ramp Down] 已到达安全位置并失能")
+        print("[Ramp Down] 已降低到安全kp/kd并失能")
     
     rate = RateLimiter(frequency=50.0, warn=False)
     mode_str = "有头" if not headless else "无头"

@@ -253,52 +253,92 @@ class MotorServer:
         IMUWorker(path, state_q, baud, evt).run()
 
     def _register_motors(self, joint_ids: List[int]):
-        """注册并使能指定的电机"""
+        """注册并使能指定的电机 (多线程并行使能)"""
+        import concurrent.futures
+        
+        start_time = time.perf_counter()
+        
+        # 第一步: 串行添加电机对象 (必须串行，因为 addMotor 修改共享状态)
+        motors_to_enable = []
         with self.motor_lock:
             for jid in joint_ids:
                 cfg = JOINT_CONFIG.get(jid)
                 if not cfg:
                     continue
                 if jid in self.motors:
-                    motor = self.motors[jid]
-                    try:
-                        self.dm_mc.switchControlMode(motor, Control_Type.MIT)
-                        self.dm_mc.enable(motor)
-                        print(f"✓ 电机 J{jid} 重新使能")
-                    except Exception as e:
-                        print(f"✗ 电机重新使能失败 J{jid}: {e}")
-                    continue
-                motor = DM_Motor(cfg[0], jid, jid + 0x80)
-                self.dm_mc.addMotor(motor)
-                try:
-                    self.dm_mc.switchControlMode(motor, Control_Type.MIT)
-                    self.dm_mc.enable(motor)
+                    motors_to_enable.append((jid, self.motors[jid], True))  # (jid, motor, is_re_enable)
+                else:
+                    motor = DM_Motor(cfg[0], jid, jid + 0x80)
+                    self.dm_mc.addMotor(motor)
                     self.motors[jid] = motor
-                    print(f"✓ 电机 J{jid} 使能成功")
-                except Exception as e:
-                    print(f"✗ 电机使能失败 J{jid}: {e}")
-            self.registered = len(self.motors) > 0
-            print(f"✓ 共注册 {len(self.motors)} 个电机")
+                    motors_to_enable.append((jid, motor, False))
+        
+        # 第二步: 并行使能电机
+        success_count = 0
+        fail_count = 0
+        
+        def enable_motor(args):
+            jid, motor, is_re_enable = args
+            try:
+                self.dm_mc.switchControlMode(motor, Control_Type.MIT)
+                self.dm_mc.enable(motor)
+                return (jid, True, is_re_enable)
+            except Exception as e:
+                return (jid, False, str(e))
+        
+        # 使用线程池并行使能
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(motors_to_enable), 8)) as executor:
+            results = list(executor.map(enable_motor, motors_to_enable))
+        
+        for result in results:
+            jid, ok, info = result
+            if ok:
+                success_count += 1
+                status = "重新使能" if info else "使能成功"
+                print(f"✓ 电机 J{jid} {status}")
+            else:
+                fail_count += 1
+                print(f"✗ 电机使能失败 J{jid}: {info}")
+        
+        self.registered = success_count > 0
+        elapsed = (time.perf_counter() - start_time) * 1000
+        print(f"✓ 共注册 {success_count} 个电机 (耗时 {elapsed:.1f}ms)")
+        if fail_count > 0:
+            print(f"✗ {fail_count} 个电机使能失败")
 
     def _disable_motors(self, joint_ids: List[int] = None):
-        """失能指定电机"""
+        """失能指定电机 (多线程并行失能)"""
+        import concurrent.futures
+        
+        start_time = time.perf_counter()
+        
         with self.motor_lock:
             if joint_ids is None:
                 joint_ids = list(self.motors.keys())
-            for jid in joint_ids:
-                if jid not in self.motors:
-                    continue
-                motor = self.motors[jid]
-                try:
-                    self.dm_mc.controlMIT(motor, 0, 0, 0, 0, 0)
-                    time.sleep(0.01)
-                    self.dm_mc.disable(motor)
-                except:
-                    pass
-            if joint_ids == list(self.motors.keys()):
+            motors_to_disable = [(jid, self.motors[jid]) for jid in joint_ids if jid in self.motors]
+        
+        def disable_motor(args):
+            jid, motor = args
+            try:
+                self.dm_mc.controlMIT(motor, 0, 0, 0, 0, 0)
+                time.sleep(0.01)
+                self.dm_mc.disable(motor)
+                return (jid, True)
+            except:
+                return (jid, False)
+        
+        # 使用线程池并行失能
+        if motors_to_disable:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(motors_to_disable), 8)) as executor:
+                list(executor.map(disable_motor, motors_to_disable))
+        
+        with self.motor_lock:
+            if set(joint_ids) == set(self.motors.keys()):
                 self.motors.clear()
                 self.registered = False
-            print(f"✓ 电机已失能")
+        
+        elapsed = (time.perf_counter() - start_time) * 1000
+        print(f"✓ 电机已失能 (耗时 {elapsed:.1f}ms)")
 
     def _get_gripper_direction(self, gripper_id: int) -> int:
         if gripper_id == LEFT_GRIPPER_ID:
@@ -337,6 +377,11 @@ class MotorServer:
                 print(f"命令处理错误: {e}")
 
     def _mit(self, joints: dict):
+        """MIT控制 (多线程并行发送)"""
+        import concurrent.futures
+        
+        # 准备控制数据
+        control_tasks = []
         with self.motor_lock:
             for jid, p in joints.items():
                 jid = int(jid)
@@ -347,9 +392,23 @@ class MotorServer:
                 q = p.get('q', 0)
                 kp = p.get('kp') if p.get('kp') is not None else cfg[1]
                 kd = p.get('kd') if p.get('kd') is not None else cfg[2]
-                self.dm_mc.controlMIT(motor, kp, kd, q, p.get('dq', 0), p.get('tau', 0))
+                control_tasks.append((motor, kp, kd, q, p.get('dq', 0), p.get('tau', 0)))
+        
+        # 并行发送控制命令
+        def send_mit(args):
+            motor, kp, kd, q, dq, tau = args
+            self.dm_mc.controlMIT(motor, kp, kd, q, dq, tau)
+        
+        if control_tasks:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(control_tasks), 8)) as executor:
+                list(executor.map(send_mit, control_tasks))
 
     def _pos(self, joints: dict):
+        """位置控制 (多线程并行发送)"""
+        import concurrent.futures
+        
+        # 准备控制数据
+        control_tasks = []
         with self.motor_lock:
             for jid, val in joints.items():
                 jid = int(jid)
@@ -357,7 +416,16 @@ class MotorServer:
                     continue
                 motor = self.motors[jid]
                 cfg = JOINT_CONFIG.get(jid, (None, 5.0, 1.0))
-                self.dm_mc.controlMIT(motor, cfg[1], cfg[2], val, 0, 0)
+                control_tasks.append((motor, cfg[1], cfg[2], val))
+        
+        # 并行发送控制命令
+        def send_pos(args):
+            motor, kp, kd, pos = args
+            self.dm_mc.controlMIT(motor, kp, kd, pos, 0, 0)
+        
+        if control_tasks:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(control_tasks), 8)) as executor:
+                list(executor.map(send_pos, control_tasks))
 
     def _gripper_oc(self, gripper_id: int, close: bool):
         with self.motor_lock:
@@ -390,7 +458,9 @@ class MotorServer:
             self.dm_mc.controlMIT(motor, use_kp, use_kd, actual_pos, 0, 0)
 
     def _query_motors(self):
-        """定期查询电机状态"""
+        """定期查询电机状态 (多线程并行查询)"""
+        import concurrent.futures
+        
         query_interval = 0.001
         while self.running:
             try:
@@ -398,21 +468,30 @@ class MotorServer:
                     time.sleep(0.01)
                     continue
                 
+                # 获取电机列表快照
                 with self.motor_lock:
-                    result = {}
-                    for jid, motor in self.motors.items():
-                        try:
-                            self.dm_mc.refresh_motor_status(motor)
-                            result[str(jid)] = {
-                                'pos': float(motor.getPosition() or 0),
-                                'vel': float(motor.getVelocity() or 0),
-                                'tau': float(motor.getTorque() or 0)
-                            }
-                        except:
-                            result[str(jid)] = {'pos': 0, 'vel': 0, 'tau': 0}
+                    motors_snapshot = list(self.motors.items())
                 
-                with self.state_lock:
-                    self.motor_state.update(result)
+                # 并行查询电机状态
+                def query_motor(args):
+                    jid, motor = args
+                    try:
+                        self.dm_mc.refresh_motor_status(motor)
+                        return (str(jid), {
+                            'pos': float(motor.getPosition() or 0),
+                            'vel': float(motor.getVelocity() or 0),
+                            'tau': float(motor.getTorque() or 0)
+                        })
+                    except:
+                        return (str(jid), {'pos': 0, 'vel': 0, 'tau': 0})
+                
+                if motors_snapshot:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(motors_snapshot), 8)) as executor:
+                        results = list(executor.map(query_motor, motors_snapshot))
+                    
+                    result = dict(results)
+                    with self.state_lock:
+                        self.motor_state.update(result)
                 
                 time.sleep(query_interval)
             except Exception as e:

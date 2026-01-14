@@ -329,6 +329,7 @@ class MotorControlFD:
         self.motors_map = dict()
         self.recv_buffer = []
         self.recv_lock = threading.Lock()
+        self.send_lock = threading.Lock()  # 发送锁，保护多线程并发发送
         self.running = False
         self.recv_thread = None
         
@@ -415,7 +416,9 @@ class MotorControlFD:
         data_buf[5] = kd_uint >> 4
         data_buf[6] = ((kd_uint & 0xf) << 4) | ((tau_uint >> 8) & 0xf)
         data_buf[7] = tau_uint & 0xff
-        self.__send_data(DM_Motor.SlaveID, data_buf)
+        with self.send_lock:  # 加锁保护多线程并发发送
+            self.__send_data(DM_Motor.SlaveID, data_buf)
+        # print(f"[DEBUG] MIT控制: J{DM_Motor.SlaveID} (kp={kp}, kd={kd}) -> q={q:.6f}, dq={dq:.6f}, tau={tau:.6f}")
         self.recv()  # receive the data from CAN bus
 
     def control_delay(self, DM_Motor, kp: float, kd: float, q: float, dq: float, tau: float, delay: float):
@@ -449,7 +452,8 @@ class MotorControlFD:
         V_desired_uint8s = float_to_uint8s(V_desired)
         data_buf[0:4] = P_desired_uint8s
         data_buf[4:8] = V_desired_uint8s
-        self.__send_data(motorid, data_buf)
+        with self.send_lock:  # 加锁保护多线程并发发送
+            self.__send_data(motorid, data_buf)
         self.recv()  # receive the data from CAN bus
 
     def control_Vel(self, Motor, Vel_desired):
@@ -465,7 +469,8 @@ class MotorControlFD:
         data_buf = np.array([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], np.uint8)
         Vel_desired_uint8s = float_to_uint8s(Vel_desired)
         data_buf[0:4] = Vel_desired_uint8s
-        self.__send_data(motorid, data_buf)
+        with self.send_lock:  # 加锁保护多线程并发发送
+            self.__send_data(motorid, data_buf)
         self.recv()  # receive the data from CAN bus
 
     def control_pos_force(self, Motor, Pos_des: float, Vel_des, i_des):
@@ -489,7 +494,8 @@ class MotorControlFD:
         data_buf[5] = Vel_uint >> 8
         data_buf[6] = ides_uint & 0xff
         data_buf[7] = ides_uint >> 8
-        self.__send_data(motorid, data_buf)
+        with self.send_lock:  # 加锁保护多线程并发发送
+            self.__send_data(motorid, data_buf)
         self.recv()  # receive the data from CAN bus
 
     def enable(self, Motor):
@@ -499,7 +505,7 @@ class MotorControlFD:
         :param Motor: Motor object 电机对象
         """
         self.__control_cmd(Motor, np.uint8(0xFC))
-        sleep(0.1)
+        sleep(0.01)
         self.recv()  # receive the data from CAN bus
 
     def enable_old(self, Motor, ControlMode):
@@ -511,8 +517,9 @@ class MotorControlFD:
         """
         data_buf = np.array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfc], np.uint8)
         enable_id = ((int(ControlMode) - 1) << 2) + Motor.SlaveID
-        self.__send_data(enable_id, data_buf)
-        sleep(0.1)
+        with self.send_lock:  # 加锁保护多线程并发发送
+            self.__send_data(enable_id, data_buf)
+        sleep(0.01)
         self.recv()  # receive the data from CAN bus
 
     def disable(self, Motor):
@@ -521,7 +528,7 @@ class MotorControlFD:
         :param Motor: Motor object 电机对象
         """
         self.__control_cmd(Motor, np.uint8(0xFD))
-        sleep(0.1)
+        sleep(0.01)
         self.recv()  # receive the data from CAN bus
 
     def set_zero_position(self, Motor):
@@ -530,7 +537,7 @@ class MotorControlFD:
         :param Motor: Motor object 电机对象
         """
         self.__control_cmd(Motor, np.uint8(0xFE))
-        sleep(0.1)
+        sleep(0.01)
         self.recv()  # receive the data from CAN bus
 
     def recv(self):
@@ -624,7 +631,8 @@ class MotorControlFD:
 
     def __control_cmd(self, Motor, cmd: np.uint8):
         data_buf = np.array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, cmd], np.uint8)
-        self.__send_data(Motor.SlaveID, data_buf)
+        with self.send_lock:  # 加锁保护多线程并发发送
+            self.__send_data(Motor.SlaveID, data_buf)
 
     def __send_data(self, motor_id, data):
         """
@@ -647,7 +655,8 @@ class MotorControlFD:
         can_id_h = (Motor.SlaveID >> 8) & 0xff  # id high 8 bits
         data_buf = np.array([np.uint8(can_id_l), np.uint8(can_id_h), 0x33, np.uint8(RID), 0x00, 0x00, 0x00, 0x00],
                             np.uint8)
-        self.__send_data(0x7FF, data_buf)
+        with self.send_lock:  # 加锁保护多线程并发发送
+            self.__send_data(0x7FF, data_buf)
 
     def __write_motor_param(self, Motor, RID, data):
         can_id_l = Motor.SlaveID & 0xff  # id low 8 bits
@@ -660,7 +669,8 @@ class MotorControlFD:
         else:
             # data is int
             data_buf[4:8] = data_to_uint8s(int(data))
-        self.__send_data(0x7FF, data_buf)
+        with self.send_lock:  # 加锁保护多线程并发发送
+            self.__send_data(0x7FF, data_buf)
 
     def switchControlMode(self, Motor, ControlMode):
         """
@@ -668,8 +678,8 @@ class MotorControlFD:
         :param Motor: Motor object 电机对象
         :param ControlMode: Control_Type 电机控制模式 example:MIT:Control_Type.MIT MIT模式
         """
-        max_retries = 20
-        retry_interval = 0.1  # retry times
+        max_retries = 10
+        retry_interval = 0.01  # 优化: 从0.1s减少到10ms
         RID = 10
         self.__write_motor_param(Motor, RID, np.uint8(ControlMode))
         for _ in range(max_retries):

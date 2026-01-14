@@ -23,7 +23,7 @@ from textual.reactive import reactive
 from rich.text import Text
 
 # 配置参数
-CAN_INTERFACE = "can0"  # SocketCAN 接口名
+CAN_INTERFACE = "can1"  # SocketCAN 接口名
 UI_REFRESH_RATE = 10  # UI刷新频率 Hz (降低以保证流畅)
 CAN_POLL_INTERVAL = 0.05  # CAN轮询间隔 50ms (20Hz)
 
