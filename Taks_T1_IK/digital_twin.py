@@ -1,5 +1,5 @@
 """MuJoCo数字孪生程序 - 临时调试工具
-在MuJoCo中调整关节值，真机同步执行
+键盘控制关节，真机同步执行
 """
 
 import sys
@@ -12,8 +12,8 @@ import mujoco.viewer
 from loop_rate_limiters import RateLimiter
 import time
 
-sys.path.insert(0, str(Path(__file__).parent / "taks_sdk"))
-import taks
+sys.path.insert(0, str(Path(__file__).parent))
+from taks_sdk import taks
 
 # 模型路径
 MODELS = {
@@ -21,20 +21,65 @@ MODELS = {
     "semi": Path(__file__).parent / "assets" / "Semi_Taks_T1" / "scene_Semi_Taks_T1.xml",
 }
 
-# 关节名 -> SDK ID映射
-JOINT_TO_SDK = {
-    "right_shoulder_pitch_joint": 1, "right_shoulder_roll_joint": 2, "right_shoulder_yaw_joint": 3,
-    "right_elbow_joint": 4, "right_wrist_roll_joint": 5, "right_wrist_yaw_joint": 6, "right_wrist_pitch_joint": 7,
-    "left_shoulder_pitch_joint": 9, "left_shoulder_roll_joint": 10, "left_shoulder_yaw_joint": 11,
-    "left_elbow_joint": 12, "left_wrist_roll_joint": 13, "left_wrist_yaw_joint": 14, "left_wrist_pitch_joint": 15,
-    "waist_yaw_joint": 17, "waist_roll_joint": 18, "waist_pitch_joint": 19,
-    "neck_yaw_joint": 20, "neck_roll_joint": 21, "neck_pitch_joint": 22,
-    # 全身额外关节
-    "left_hip_yaw_joint": 23, "left_hip_roll_joint": 24, "left_hip_pitch_joint": 25,
-    "left_knee_joint": 26, "left_ankle_pitch_joint": 27, "left_ankle_roll_joint": 28,
-    "right_hip_yaw_joint": 29, "right_hip_roll_joint": 30, "right_hip_pitch_joint": 31,
-    "right_knee_joint": 32, "right_ankle_pitch_joint": 33, "right_ankle_roll_joint": 34,
-}
+# 半身关节列表（按索引升序）
+JOINT_LIST_SEMI = [
+    ("right_shoulder_pitch_joint", 1),
+    ("right_shoulder_roll_joint", 2),
+    ("right_shoulder_yaw_joint", 3),
+    ("right_elbow_joint", 4),
+    ("right_wrist_roll_joint", 5),
+    ("right_wrist_yaw_joint", 6),
+    ("right_wrist_pitch_joint", 7),
+    ("left_shoulder_pitch_joint", 9),
+    ("left_shoulder_roll_joint", 10),
+    ("left_shoulder_yaw_joint", 11),
+    ("left_elbow_joint", 12),
+    ("left_wrist_roll_joint", 13),
+    ("left_wrist_yaw_joint", 14),
+    ("left_wrist_pitch_joint", 15),
+    ("waist_yaw_joint", 17),
+    ("waist_roll_joint", 18),
+    ("waist_pitch_joint", 19),
+    ("neck_yaw_joint", 20),
+    ("neck_roll_joint", 21),
+    ("neck_pitch_joint", 22),
+]
+
+# 全身关节列表（腿部+半身，按索引升序）
+JOINT_LIST_FULL = [
+    ("right_shoulder_pitch_joint", 1),
+    ("right_shoulder_roll_joint", 2),
+    ("right_shoulder_yaw_joint", 3),
+    ("right_elbow_joint", 4),
+    ("right_wrist_roll_joint", 5),
+    ("right_wrist_yaw_joint", 6),
+    ("right_wrist_pitch_joint", 7),
+    ("left_shoulder_pitch_joint", 9),
+    ("left_shoulder_roll_joint", 10),
+    ("left_shoulder_yaw_joint", 11),
+    ("left_elbow_joint", 12),
+    ("left_wrist_roll_joint", 13),
+    ("left_wrist_yaw_joint", 14),
+    ("left_wrist_pitch_joint", 15),
+    ("waist_yaw_joint", 17),
+    ("waist_roll_joint", 18),
+    ("waist_pitch_joint", 19),
+    ("neck_yaw_joint", 20),
+    ("neck_roll_joint", 21),
+    ("neck_pitch_joint", 22),
+    ("right_hip_pitch_joint", 23),
+    ("right_hip_roll_joint", 24),
+    ("right_hip_yaw_joint", 25),
+    ("right_knee_joint", 26),
+    ("right_ankle_pitch_joint", 27),
+    ("right_ankle_roll_joint", 28),
+    ("left_hip_pitch_joint", 29),
+    ("left_hip_roll_joint", 30),
+    ("left_hip_yaw_joint", 31),
+    ("left_knee_joint", 32),
+    ("left_ankle_pitch_joint", 33),
+    ("left_ankle_roll_joint", 34),
+]
 
 # 默认KP/KD
 SDK_GAINS = {
@@ -44,11 +89,15 @@ SDK_GAINS = {
     13: (10.0, 1.0), 14: (10.0, 1.0), 15: (10.0, 1.0), 16: (2.0, 0.2),
     17: (250.0, 5.0), 18: (250.0, 5.0), 19: (250.0, 5.0),
     20: (1.0, 0.5), 21: (1.0, 0.5), 22: (1.0, 0.5),
+    # 腿部关节
     23: (100.0, 5.0), 24: (100.0, 5.0), 25: (100.0, 5.0),
     26: (100.0, 5.0), 27: (50.0, 2.0), 28: (50.0, 2.0),
     29: (100.0, 5.0), 30: (100.0, 5.0), 31: (100.0, 5.0),
     32: (100.0, 5.0), 33: (50.0, 2.0), 34: (50.0, 2.0),
 }
+
+# 关节调整步长
+JOINT_STEP = 0.05
 
 
 def parse_args():
@@ -70,15 +119,21 @@ def main():
     data = mujoco.MjData(model)
     mujoco.mj_resetDataKeyframe(model, data, 0)
     
-    # 构建关节映射: jname -> (qpos_idx, sdk_id)
-    joint_map = {}
-    for jname, sdk_id in JOINT_TO_SDK.items():
+    # 根据模型选择关节列表
+    joint_list = JOINT_LIST_FULL if args.model == "full" else JOINT_LIST_SEMI
+    
+    # 构建关节映射: [(jname, qpos_idx, sdk_id), ...]
+    joint_info = []
+    for jname, sdk_id in joint_list:
         try:
             jid = model.joint(jname).id
             qpos_idx = model.jnt_qposadr[jid]
-            joint_map[jname] = (qpos_idx, sdk_id)
+            joint_info.append((jname, qpos_idx, sdk_id))
         except:
-            pass  # 模型中不存在该关节
+            pass
+    
+    # 当前选中的关节索引
+    current_joint_idx = [0]
     
     # 连接真机
     robot = None
@@ -94,6 +149,7 @@ def main():
     
     running = True
     shutdown_requested = False
+    need_send = [True]  # 初始发送一次
     
     def signal_handler(signum, frame):
         nonlocal running, shutdown_requested
@@ -105,12 +161,45 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
+    def key_callback(keycode):
+        """键盘回调: 上下选关节，左右调值，R复位"""
+        idx = current_joint_idx[0]
+        jname, qpos_idx, sdk_id = joint_info[idx]
+        
+        if keycode == 265:  # UP
+            current_joint_idx[0] = (idx - 1) % len(joint_info)
+            print_current_joint()
+        elif keycode == 264:  # DOWN
+            current_joint_idx[0] = (idx + 1) % len(joint_info)
+            print_current_joint()
+        elif keycode == 263:  # LEFT
+            data.qpos[qpos_idx] -= JOINT_STEP
+            need_send[0] = True
+            print_current_joint()
+        elif keycode == 262:  # RIGHT
+            data.qpos[qpos_idx] += JOINT_STEP
+            need_send[0] = True
+            print_current_joint()
+        elif keycode == 82:  # R = Reset
+            mujoco.mj_resetDataKeyframe(model, data, 0)
+            need_send[0] = True
+            print("[Reset] 已复位到初始位置")
+        elif keycode == 48:  # 0 = 当前关节归零
+            data.qpos[qpos_idx] = 0.0
+            need_send[0] = True
+            print_current_joint()
+    
+    def print_current_joint():
+        idx = current_joint_idx[0]
+        jname, qpos_idx, sdk_id = joint_info[idx]
+        print(f"[{idx+1}/{len(joint_info)}] {jname} (SDK:{sdk_id}) = {data.qpos[qpos_idx]:.4f}")
+    
     def send_to_real():
         """发送当前MuJoCo关节位置到真机"""
         if not enable_real or robot is None:
             return
         mit_cmd = {}
-        for jname, (qpos_idx, sdk_id) in joint_map.items():
+        for jname, qpos_idx, sdk_id in joint_info:
             q_val = float(data.qpos[qpos_idx])
             kp, kd = SDK_GAINS.get(sdk_id, (10.0, 1.0))
             mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': 0.0, 'kp': kp, 'kd': kd}
@@ -119,23 +208,32 @@ def main():
     
     rate = RateLimiter(frequency=50.0, warn=False)
     print(f"[Info] 模型: {args.model}, 真机: {'ON' if enable_real else 'OFF'}")
-    print("[Info] 在MuJoCo GUI中拖动关节，真机会同步执行")
+    print(f"[Info] 可控关节数: {len(joint_info)}")
+    print("[操作说明]")
+    print("  ↑/↓ = 切换关节")
+    print("  ←/→ = 减少/增加关节值")
+    print("  R   = 复位所有关节")
+    print("  0   = 当前关节归零")
+    print_current_joint()
     
-    with mujoco.viewer.launch_passive(model, data, show_left_ui=True, show_right_ui=True) as viewer:
+    with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False,
+                                       key_callback=key_callback) as viewer:
         mujoco.mjv_defaultFreeCamera(model, viewer.cam)
+        
         while running and viewer.is_running():
             mujoco.mj_forward(model, data)
-            send_to_real()
+            
+            if need_send[0]:
+                send_to_real()
+                need_send[0] = False
+            
             viewer.sync()
             rate.sleep()
     
     # 清理
     if enable_real:
-        # 失能所有关节
-        mit_cmd = {}
-        for jname, (_, sdk_id) in joint_map.items():
-            mit_cmd[sdk_id] = {'q': 0.0, 'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0}
-        if robot:
+        mit_cmd = {sdk_id: {'q': 0.0, 'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0} for _, _, sdk_id in joint_info}
+        if robot and mit_cmd:
             robot.controlMIT(mit_cmd)
         taks.disconnect()
         print("[TAKS] 已断开")

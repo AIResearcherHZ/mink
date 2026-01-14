@@ -18,9 +18,8 @@ from rich.console import Console
 from rich.table import Table
 
 sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent / "taks_sdk"))
 from vr_interface import VRReceiver
-import taks
+from taks_sdk import taks
 
 _XML = Path(__file__).parent / "assets" / "Semi_Taks_T1" / "scene_Semi_Taks_T1.xml"
 
