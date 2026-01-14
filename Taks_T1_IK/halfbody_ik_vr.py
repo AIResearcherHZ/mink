@@ -126,7 +126,7 @@ def compute_lookat_quat(head_pos: np.ndarray, target_pos: np.ndarray) -> np.ndar
 def parse_args():
     parser = argparse.ArgumentParser(description="半身VR控制IK - SIM2REAL")
     parser.add_argument("--headless", action="store_true", default=False, help="无头模式(无GUI)")
-    parser.add_argument("--host", type=str, default="192.168.5.16", help="taks服务器地址")
+    parser.add_argument("--host", type=str, default="192.168.5.7", help="taks服务器地址")
     parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
     parser.add_argument("--no-real", action="store_true", default=False, help="禁用真机控制(仅仿真)")
     parser.add_argument("--no-ramp-up", action="store_true", default=False, help="禁用缓启动")

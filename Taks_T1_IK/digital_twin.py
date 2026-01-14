@@ -54,7 +54,7 @@ SDK_GAINS = {
 def parse_args():
     parser = argparse.ArgumentParser(description="MuJoCo数字孪生")
     parser.add_argument("--model", type=str, default="semi", choices=["full", "semi"], help="模型类型")
-    parser.add_argument("--host", type=str, default="192.168.5.16", help="taks服务器地址")
+    parser.add_argument("--host", type=str, default="192.168.5.7", help="taks服务器地址")
     parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
     parser.add_argument("--no-real", action="store_true", help="禁用真机(仅仿真)")
     return parser.parse_args()
