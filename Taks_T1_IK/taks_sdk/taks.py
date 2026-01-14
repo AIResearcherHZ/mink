@@ -88,7 +88,7 @@ def _deserialize_msg(data: bytes) -> dict:
 # ============ 夹爪配置 ============
 # 夹爪位置定义 (电机弧度位置)
 GRIPPER_OPEN = 0.0       # 打开位置
-GRIPPER_CLOSE = -1.1     # 闭合位置
+GRIPPER_CLOSE = 1.05     # 闭合位置
 
 # 左右手夹爪镜像配置 (预留，目前默认都一样)
 RIGHT_GRIPPER_DIRECTION = 1  # 右手夹爪方向系数
