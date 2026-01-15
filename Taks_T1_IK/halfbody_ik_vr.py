@@ -15,12 +15,18 @@ import mujoco.viewer
 from loop_rate_limiters import RateLimiter
 import mink
 import time
+from rich.console import Console
+from rich.table import Table
+from rich.live import Live
 
 sys.path.insert(0, str(Path(__file__).parent))
 from vr_interface import VRReceiver
 from taks_sdk import taks
 
 _XML = Path(__file__).parent / "assets" / "Semi_Taks_T1" / "scene_Semi_Taks_T1.xml"
+
+# taks发送频率限制 (Hz), None表示不限制
+TAKS_SEND_RATE = 200.0  # 设为None不限制发送频率
 
 # 关节分组
 JOINT_GROUPS = {
@@ -210,8 +216,6 @@ def start_local_sdk():
     return proc
 
 
-
-
 def main():
     args = parse_args()
     headless = args.headless
@@ -343,32 +347,38 @@ def main():
         elif keycode == 67:  # C
             do_calibrate()
     
-    def send_to_real(q_arr, tau_arr, ramp_progress=1.0):
-        """发送关节位置和前馈扭矩到真机
+    def build_mit_cmd(q_arr, tau_arr, ramp_progress=1.0):
+        """构建MIT命令字典
         ramp_progress: 启动进度[0,1]，用于非线性kp/kd渐变
-        - ramp up: kp/kd 从0非线性(ease_out:越来越慢)增加到目标值
-        - 正常运行: ramp_progress=1.0, 使用完整kp/kd
         """
-        if not enable_real or robot is None:
-            return
         mit_cmd = {}
-        # 非线性kp/kd缩放因子 (ease_out: 开始快，结束慢)
         kp_kd_scale = ease_out(ramp_progress) if ramp_progress < 1.0 else 1.0
         for jname, info in joint_mapping.items():
-            qpos_idx = info['qpos']
-            dof_idx = info['dof']
             sdk_id = info['sdk_id']
             kp_target, kd_target = SDK_JOINT_GAINS.get(sdk_id, (10.0, 1.0))
-            q_target = float(q_arr[qpos_idx]) if qpos_idx < len(q_arr) else 0.0
-            tau_val = float(tau_arr[dof_idx]) if dof_idx < len(tau_arr) else 0.0
-            # 启动阶段: kp/kd非线性渐变，位置直接发送目标位置
-            kp_val = kp_target * kp_kd_scale
-            kd_val = kd_target * kp_kd_scale
-            # 前馈扭矩应用缩放(启动阶段也按进度缩放)
-            mit_cmd[sdk_id] = {'q': q_target, 'dq': 0.0, 'tau': tau_val * FEEDFORWARD_SCALE * kp_kd_scale, 
-                              'kp': kp_val, 'kd': kd_val}
-        if mit_cmd:
-            robot.controlMIT(mit_cmd)
+            q_target = float(q_arr[info['qpos']]) if info['qpos'] < len(q_arr) else 0.0
+            tau_val = float(tau_arr[info['dof']]) if info['dof'] < len(tau_arr) else 0.0
+            mit_cmd[sdk_id] = {
+                'q': q_target, 'dq': 0.0,
+                'tau': tau_val * FEEDFORWARD_SCALE * kp_kd_scale,
+                'kp': kp_target * kp_kd_scale,
+                'kd': kd_target * kp_kd_scale
+            }
+        return mit_cmd
+    
+    def send_to_real(mit_cmd):
+        """发送MIT命令到真机(受频率限制)"""
+        nonlocal last_taks_send_time
+        if not enable_real or robot is None or not mit_cmd:
+            return False
+        # 频率限制检查
+        if TAKS_SEND_RATE:
+            now = time.time()
+            if now - last_taks_send_time < 1.0 / TAKS_SEND_RATE:
+                return False
+            last_taks_send_time = now
+        robot.controlMIT(mit_cmd)
+        return True
     
     def send_gripper(left_val: float, right_val: float):
         """发送夹爪控制命令(VR gripper值0-1映射到0-100百分比)"""
@@ -403,11 +413,54 @@ def main():
     rate = RateLimiter(frequency=200.0, warn=False)
     dt = rate.dt
     reset_duration = 1.5
-    print_counter = 0
+    
+    # taks发送频率限制
+    last_taks_send_time = 0.0
+    
+    # 帧率统计
+    console = Console()
+    frame_count = 0
+    fps_start_time = time.time()
+    current_fps = 0.0
+    last_mit_cmd = {}  # 保存最后发送的MIT命令用于打印
+    
+    # SDK ID -> 关节名映射(用于打印)
+    SDK_ID_TO_NAME = {v: k for k, v in JOINT_NAME_TO_SDK_ID.items()}
+    
+    def build_status_table(fps: float, mit_cmd: dict, vr_data, vr_calib: dict, enable_real: bool) -> Table:
+        """构建rich状态表格"""
+        table = Table(title="TAKS MIT控制状态", show_header=True, header_style="bold cyan")
+        table.add_column("ID", style="dim", width=3)
+        table.add_column("关节名", width=28)
+        table.add_column("q(rad)", justify="right", width=8)
+        table.add_column("tau(Nm)", justify="right", width=8)
+        table.add_column("kp", justify="right", width=6)
+        table.add_column("kd", justify="right", width=6)
+        
+        # 按SDK ID排序显示22个关节
+        for sdk_id in sorted(mit_cmd.keys()):
+            cmd = mit_cmd[sdk_id]
+            jname = SDK_ID_TO_NAME.get(sdk_id, f"joint_{sdk_id}")
+            table.add_row(
+                str(sdk_id),
+                jname,
+                f"{cmd['q']:.3f}",
+                f"{cmd['tau']:.3f}",
+                f"{cmd['kp']:.2f}",
+                f"{cmd['kd']:.2f}"
+            )
+        
+        # 状态行
+        table.add_section()
+        rate_str = f"{TAKS_SEND_RATE:.0f}Hz" if TAKS_SEND_RATE else "无限制"
+        status = f"FPS: {fps:.1f} | 发送频率: {rate_str} | VR: {'ON' if vr_data.tracking_enabled else 'OFF'} | 校准: {'YES' if vr_calib['done'] else 'NO'} | 真机: {'ON' if enable_real else 'OFF'}"
+        table.add_row("", status, "", "", "", "")
+        return table
     
     mode_str = "有头" if not headless else "无头"
     real_str = "SIM2REAL" if enable_real else "仅仿真"
-    print(f"[Info] 模式: {mode_str}, {real_str}")
+    rate_str = f"{TAKS_SEND_RATE:.0f}Hz" if TAKS_SEND_RATE else "无限制"
+    print(f"[Info] 模式: {mode_str}, {real_str}, taks发送频率: {rate_str}")
     print("[Info] 键盘: C=校准, Backspace=复位 | VR手柄: B双击=校准, A双击=复位")
     
     def get_real_positions(timeout: float = 2.0):
@@ -488,7 +541,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     def control_loop(viewer=None):
-        nonlocal print_counter, running
+        nonlocal running, frame_count, fps_start_time, current_fps, last_mit_cmd
         
         # 初始化启动: 从真机获取当前位置作为起点
         if enable_ramp_up:
@@ -500,6 +553,9 @@ def main():
             ramp_state["active"] = False
             ramp_state["progress"] = 1.0
             print("[Ramp Up] 缓启动已禁用")
+        
+        print_interval = 1.0  # 打印间隔(s)
+        last_print_time = time.time()
         
         while running:
             if viewer is not None and not viewer.is_running():
@@ -562,7 +618,9 @@ def main():
                     print("[Reset] 复位完成")
                 mujoco.mj_forward(model, data)
                 data.qfrc_applied[:] = data.qfrc_bias[:]
-                send_to_real(cfg.q, data.qfrc_bias)
+                mit_cmd = build_mit_cmd(cfg.q, data.qfrc_bias)
+                send_to_real(mit_cmd)
+                last_mit_cmd = mit_cmd
                 if viewer:
                     mujoco.mj_camlight(model, data)
                     viewer.sync()
@@ -603,13 +661,24 @@ def main():
             data.qfrc_applied[:] = data.qfrc_bias[:]
             
             # 发送到真机
-            send_to_real(cfg.q, data.qfrc_bias, ramp_state["progress"])
+            mit_cmd = build_mit_cmd(cfg.q, data.qfrc_bias, ramp_state["progress"])
+            send_to_real(mit_cmd)
+            last_mit_cmd = mit_cmd
             send_gripper(vr_data.left_hand.gripper, vr_data.right_hand.gripper)
             
-            print_counter += 1
-            if print_counter >= 200:
-                print_counter = 0
-                print(f"[VR] Tracking={'ON' if vr_data.tracking_enabled else 'OFF'}, Calibrated={'YES' if vr_calib['done'] else 'NO'}, Real={'ON' if enable_real else 'OFF'}")
+            # 帧率统计和rich表格打印
+            frame_count += 1
+            now = time.time()
+            if now - fps_start_time >= 1.0:
+                current_fps = frame_count / (now - fps_start_time)
+                frame_count = 0
+                fps_start_time = now
+            
+            if now - last_print_time >= print_interval and last_mit_cmd:
+                last_print_time = now
+                console.clear()
+                table = build_status_table(current_fps, last_mit_cmd, vr_data, vr_calib, enable_real)
+                console.print(table)
             
             if viewer:
                 mujoco.mj_camlight(model, data)
