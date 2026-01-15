@@ -251,9 +251,16 @@ def main():
         try:
             taks.connect(args.host, cmd_port=args.port)
             robot = taks.register("Taks-T1-semibody")
+            print(f"[TAKS] 已注册半身设备")
+            time.sleep(4.0)
+            print(f"[TAKS] 等待4秒后注册gripper...")
             left_gripper = taks.register("Taks-T1-leftgripper")
+            print(f"[TAKS] 已注册左gripper")
+            time.sleep(1.0)
             right_gripper = taks.register("Taks-T1-rightgripper")
-            print(f"[TAKS] 已连接 {args.host}:{args.port}, 且夹爪已注册")
+            print(f"[TAKS] 已注册右gripper")
+            time.sleep(1.0)
+            print(f"[TAKS] 已连接 {args.host}:{args.port}, 所有设备注册完成")
         except Exception as e:
             print(f"[TAKS] 连接失败: {e}, 仅仿真模式")
             enable_real = False

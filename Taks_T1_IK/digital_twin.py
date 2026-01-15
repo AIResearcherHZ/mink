@@ -240,12 +240,23 @@ def main():
     
     # 连接真机
     robot = None
+    left_gripper = None
+    right_gripper = None
     if enable_real:
         try:
             taks.connect(args.host, cmd_port=args.port)
             device_type = "Taks-T1" if args.model == "full" else "Taks-T1-semibody"
             robot = taks.register(device_type)
-            print(f"[TAKS] 已连接 {args.host}:{args.port}, 设备: {device_type}")
+            print(f"[TAKS] 已注册设备: {device_type}")
+            time.sleep(4.0)
+            print(f"[TAKS] 等待4秒后注册gripper...")
+            left_gripper = taks.register("Taks-T1-leftgripper")
+            print(f"[TAKS] 已注册左gripper")
+            time.sleep(1.0)
+            right_gripper = taks.register("Taks-T1-rightgripper")
+            print(f"[TAKS] 已注册右gripper")
+            time.sleep(1.0)
+            print(f"[TAKS] 已连接 {args.host}:{args.port}, 所有设备注册完成")
         except Exception as e:
             print(f"[TAKS] 连接失败: {e}")
             enable_real = False
