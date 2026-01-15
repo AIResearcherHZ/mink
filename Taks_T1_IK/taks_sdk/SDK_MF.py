@@ -201,8 +201,20 @@ class MotorServer:
         self.registered = False
         self.motor_lock = Lock()
         
-        # 命令队列
+        # 最新MIT命令缓存(覆盖策略，避免队列堆积)
+        self._latest_mit_cmd: Optional[Dict] = None
+        self._mit_cmd_lock = Lock()
+        
+        # 最新夹爪命令缓存(覆盖策略)
+        self._latest_gripper_cmd: Dict[int, Dict] = {}  # {gripper_id: cmd_dict}
+        self._gripper_cmd_lock = Lock()
+        
+        # 优先命令队列(register/disable等)
         self.cmd_queue = Queue(maxsize=100)
+        
+        # 复用线程池
+        import concurrent.futures
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
         
         # 状态缓存
         self.motor_state = {}
@@ -351,36 +363,49 @@ class MotorServer:
         return pos * self._get_gripper_direction(gripper_id)
 
     def _process_commands(self):
-        """处理命令队列"""
+        """处理命令队列(优先命令) + MIT/夹爪命令(最新覆盖)"""
         while self.running:
             try:
-                msg = self.cmd_queue.get(timeout=0.01)
-                cmd = msg.get('cmd', '')
+                # 1. 处理优先命令(register/disable等)
+                try:
+                    msg = self.cmd_queue.get_nowait()
+                    cmd = msg.get('cmd', '')
+                    if cmd == 'register':
+                        self._register_motors(msg.get('joint_ids', ALL_JOINT_IDS))
+                    elif cmd == 'disable_all':
+                        self._disable_motors()
+                except Empty:
+                    pass
                 
-                if cmd == 'register':
-                    self._register_motors(msg.get('joint_ids', ALL_JOINT_IDS))
-                elif cmd == 'disable_all':
-                    self._disable_motors()
-                elif cmd == 'mit':
-                    self._mit(msg.get('joints', {}))
-                elif cmd == 'pos':
-                    self._pos(msg.get('joints', {}))
-                elif cmd == 'gripper_oc':
-                    self._gripper_oc(msg.get('gripper_id'), msg.get('close', False))
-                elif cmd == 'gripper_pos':
-                    self._gripper_pos(msg.get('gripper_id'), msg.get('percent', 0))
-                elif cmd == 'gripper_mit':
-                    self._gripper_mit(msg.get('gripper_id'), msg.get('percent', 0), msg.get('kp'), msg.get('kd'))
-            except Empty:
-                pass
+                # 2. 处理最新MIT命令
+                with self._mit_cmd_lock:
+                    mit_cmd = self._latest_mit_cmd
+                    self._latest_mit_cmd = None
+                if mit_cmd:
+                    self._mit_fast(mit_cmd)
+                
+                # 3. 处理最新夹爪命令
+                with self._gripper_cmd_lock:
+                    gripper_cmds = dict(self._latest_gripper_cmd)
+                    self._latest_gripper_cmd.clear()
+                for gripper_id, cmd_data in gripper_cmds.items():
+                    cmd_type = cmd_data.get('type')
+                    if cmd_type == 'oc':
+                        self._gripper_oc(gripper_id, cmd_data.get('close', False))
+                    elif cmd_type == 'pos':
+                        self._gripper_pos(gripper_id, cmd_data.get('percent', 0))
+                    elif cmd_type == 'mit':
+                        self._gripper_mit(gripper_id, cmd_data.get('percent', 0), cmd_data.get('kp'), cmd_data.get('kd'))
+                
+                # 无命令时短暂休眠
+                if not mit_cmd and not gripper_cmds:
+                    time.sleep(0.001)
+                    
             except Exception as e:
                 print(f"命令处理错误: {e}")
 
-    def _mit(self, joints: dict):
-        """MIT控制 (多线程并行发送)"""
-        import concurrent.futures
-        
-        # 准备控制数据
+    def _mit_fast(self, joints: dict):
+        """MIT控制 - 快速版(复用线程池)"""
         control_tasks = []
         with self.motor_lock:
             for jid, p in joints.items():
@@ -394,20 +419,19 @@ class MotorServer:
                 kd = p.get('kd') if p.get('kd') is not None else cfg[2]
                 control_tasks.append((motor, kp, kd, q, p.get('dq', 0), p.get('tau', 0)))
         
-        # 并行发送控制命令
         def send_mit(args):
             motor, kp, kd, q, dq, tau = args
             self.dm_mc.controlMIT(motor, kp, kd, q, dq, tau)
         
         if control_tasks:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(control_tasks), 8)) as executor:
-                list(executor.map(send_mit, control_tasks))
+            list(self._executor.map(send_mit, control_tasks))
+
+    def _mit(self, joints: dict):
+        """MIT控制 - 兼容旧接口"""
+        self._mit_fast(joints)
 
     def _pos(self, joints: dict):
-        """位置控制 (多线程并行发送)"""
-        import concurrent.futures
-        
-        # 准备控制数据
+        """位置控制 (复用线程池)"""
         control_tasks = []
         with self.motor_lock:
             for jid, val in joints.items():
@@ -418,14 +442,12 @@ class MotorServer:
                 cfg = JOINT_CONFIG.get(jid, (None, 5.0, 1.0))
                 control_tasks.append((motor, cfg[1], cfg[2], val))
         
-        # 并行发送控制命令
         def send_pos(args):
             motor, kp, kd, pos = args
             self.dm_mc.controlMIT(motor, kp, kd, pos, 0, 0)
         
         if control_tasks:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(control_tasks), 8)) as executor:
-                list(executor.map(send_pos, control_tasks))
+            list(self._executor.map(send_pos, control_tasks))
 
     def _gripper_oc(self, gripper_id: int, close: bool):
         with self.motor_lock:
@@ -458,37 +480,32 @@ class MotorServer:
             self.dm_mc.controlMIT(motor, use_kp, use_kd, actual_pos, 0, 0)
 
     def _query_motors(self):
-        """定期查询电机状态 (多线程并行查询)"""
-        import concurrent.futures
-        
+        """定期查询电机状态 (复用线程池)"""
         query_interval = 0.001
+        
+        def query_motor(args):
+            jid, motor = args
+            try:
+                self.dm_mc.refresh_motor_status(motor)
+                return (str(jid), {
+                    'pos': float(motor.getPosition() or 0),
+                    'vel': float(motor.getVelocity() or 0),
+                    'tau': float(motor.getTorque() or 0)
+                })
+            except:
+                return (str(jid), {'pos': 0, 'vel': 0, 'tau': 0})
+        
         while self.running:
             try:
                 if not self.registered:
                     time.sleep(0.01)
                     continue
                 
-                # 获取电机列表快照
                 with self.motor_lock:
                     motors_snapshot = list(self.motors.items())
                 
-                # 并行查询电机状态
-                def query_motor(args):
-                    jid, motor = args
-                    try:
-                        self.dm_mc.refresh_motor_status(motor)
-                        return (str(jid), {
-                            'pos': float(motor.getPosition() or 0),
-                            'vel': float(motor.getVelocity() or 0),
-                            'tau': float(motor.getTorque() or 0)
-                        })
-                    except:
-                        return (str(jid), {'pos': 0, 'vel': 0, 'tau': 0})
-                
                 if motors_snapshot:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(motors_snapshot), 8)) as executor:
-                        results = list(executor.map(query_motor, motors_snapshot))
-                    
+                    results = list(self._executor.map(query_motor, motors_snapshot))
                     result = dict(results)
                     with self.state_lock:
                         self.motor_state.update(result)
@@ -569,26 +586,38 @@ class MotorServer:
                 print(f"✓ 客户端注册设备: {device}")
             elif cmd == 'disable_all':
                 self._safe_queue_put({'cmd': 'disable_all'}, priority=True)
-            elif cmd in ('mit', 'pos'):
+            elif cmd == 'mit':
                 joints = msg.get('joints', {})
                 joints = {int(k): v for k, v in joints.items()}
-                # 过滤只保留目标关节
+                filtered = {k: v for k, v in joints.items() if k in target_joints or not target_joints}
+                # MIT命令使用覆盖策略
+                with self._mit_cmd_lock:
+                    if self._latest_mit_cmd is None:
+                        self._latest_mit_cmd = filtered
+                    else:
+                        self._latest_mit_cmd.update(filtered)
+            elif cmd == 'pos':
+                joints = msg.get('joints', {})
+                joints = {int(k): v for k, v in joints.items()}
                 filtered = {k: v for k, v in joints.items() if k in target_joints or not target_joints}
                 self._safe_queue_put({'cmd': cmd, 'joints': filtered})
             elif cmd == 'gripper_oc':
                 gripper_id = msg.get('gripper_id')
                 close = msg.get('close', False)
-                self._safe_queue_put({'cmd': 'gripper_oc', 'gripper_id': gripper_id, 'close': close})
+                with self._gripper_cmd_lock:
+                    self._latest_gripper_cmd[gripper_id] = {'type': 'oc', 'close': close}
             elif cmd == 'gripper_pos':
                 gripper_id = msg.get('gripper_id')
                 percent = msg.get('percent', 0)
-                self._safe_queue_put({'cmd': 'gripper_pos', 'gripper_id': gripper_id, 'percent': percent})
+                with self._gripper_cmd_lock:
+                    self._latest_gripper_cmd[gripper_id] = {'type': 'pos', 'percent': percent}
             elif cmd == 'gripper_mit':
                 gripper_id = msg.get('gripper_id')
                 percent = msg.get('percent', 0)
                 kp = msg.get('kp')
                 kd = msg.get('kd')
-                self._safe_queue_put({'cmd': 'gripper_mit', 'gripper_id': gripper_id, 'percent': percent, 'kp': kp, 'kd': kd})
+                with self._gripper_cmd_lock:
+                    self._latest_gripper_cmd[gripper_id] = {'type': 'mit', 'percent': percent, 'kp': kp, 'kd': kd}
                             
         except Exception as e:
             print(f"命令处理错误: {e}")
@@ -632,6 +661,10 @@ class MotorServer:
         
         print("✓ 关闭服务器...")
         self.running = False
+        
+        # 关闭线程池
+        if hasattr(self, '_executor'):
+            self._executor.shutdown(wait=False)
         
         # 失能所有电机
         self._disable_motors()

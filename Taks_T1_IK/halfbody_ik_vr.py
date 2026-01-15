@@ -26,7 +26,7 @@ from taks_sdk import taks
 _XML = Path(__file__).parent / "assets" / "Semi_Taks_T1" / "scene_Semi_Taks_T1.xml"
 
 # taks发送频率限制 (Hz), None表示不限制
-TAKS_SEND_RATE = 200.0  # 设为None不限制发送频率
+TAKS_SEND_RATE = 30  # 设为None不限制发送频率
 
 # 关节分组
 JOINT_GROUPS = {
@@ -185,7 +185,7 @@ def compute_lookat_quat(head_pos: np.ndarray, target_pos: np.ndarray) -> np.ndar
 def parse_args():
     parser = argparse.ArgumentParser(description="半身VR控制IK - SIM2REAL")
     parser.add_argument("--headless", action="store_true", default=False, help="无头模式(无GUI)")
-    parser.add_argument("--host", type=str, default="10.80.242.44", help="taks服务器地址")
+    parser.add_argument("--host", type=str, default="192.168.5.4", help="taks服务器地址")
     parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
     parser.add_argument("--no-real", action="store_true", default=False, help="禁用真机控制(仅仿真)")
     parser.add_argument("--no-ramp-up", action="store_true", default=False, help="禁用缓启动")
@@ -368,7 +368,7 @@ def main():
     
     def send_to_real(mit_cmd):
         """发送MIT命令到真机(受频率限制)"""
-        nonlocal last_taks_send_time
+        nonlocal last_taks_send_time, send_count
         if not enable_real or robot is None or not mit_cmd:
             return False
         # 频率限制检查
@@ -378,6 +378,7 @@ def main():
                 return False
             last_taks_send_time = now
         robot.controlMIT(mit_cmd)
+        send_count += 1
         return True
     
     def send_gripper(left_val: float, right_val: float):
@@ -424,10 +425,15 @@ def main():
     current_fps = 0.0
     last_mit_cmd = {}  # 保存最后发送的MIT命令用于打印
     
+    # 发送帧率统计
+    send_count = 0
+    send_fps_start = time.time()
+    current_send_fps = 0.0
+    
     # SDK ID -> 关节名映射(用于打印)
     SDK_ID_TO_NAME = {v: k for k, v in JOINT_NAME_TO_SDK_ID.items()}
     
-    def build_status_table(fps: float, mit_cmd: dict, vr_data, vr_calib: dict, enable_real: bool) -> Table:
+    def build_status_table(fps: float, send_fps: float, mit_cmd: dict, vr_data, vr_calib: dict, enable_real: bool) -> Table:
         """构建rich状态表格"""
         table = Table(title="TAKS MIT控制状态", show_header=True, header_style="bold cyan")
         table.add_column("ID", style="dim", width=3)
@@ -453,8 +459,10 @@ def main():
         # 状态行
         table.add_section()
         rate_str = f"{TAKS_SEND_RATE:.0f}Hz" if TAKS_SEND_RATE else "无限制"
-        status = f"FPS: {fps:.1f} | 发送频率: {rate_str} | VR: {'ON' if vr_data.tracking_enabled else 'OFF'} | 校准: {'YES' if vr_calib['done'] else 'NO'} | 真机: {'ON' if enable_real else 'OFF'}"
-        table.add_row("", status, "", "", "", "")
+        status1 = f"仿真FPS: {fps:.1f} | 实际发送: {send_fps:.1f}Hz | 目标频率: {rate_str}"
+        status2 = f"VR: {'ON' if vr_data.tracking_enabled else 'OFF'} | 校准: {'YES' if vr_calib['done'] else 'NO'} | 真机: {'ON' if enable_real else 'OFF'}"
+        table.add_row("", status1, "", "", "", "")
+        table.add_row("", status2, "", "", "", "")
         return table
     
     mode_str = "有头" if not headless else "无头"
@@ -542,6 +550,7 @@ def main():
     
     def control_loop(viewer=None):
         nonlocal running, frame_count, fps_start_time, current_fps, last_mit_cmd
+        nonlocal send_count, send_fps_start, current_send_fps
         
         # 初始化启动: 从真机获取当前位置作为起点
         if enable_ramp_up:
@@ -674,10 +683,16 @@ def main():
                 frame_count = 0
                 fps_start_time = now
             
+            # 发送帧率统计
+            if now - send_fps_start >= 1.0:
+                current_send_fps = send_count / (now - send_fps_start)
+                send_count = 0
+                send_fps_start = now
+            
             if now - last_print_time >= print_interval and last_mit_cmd:
                 last_print_time = now
                 console.clear()
-                table = build_status_table(current_fps, last_mit_cmd, vr_data, vr_calib, enable_real)
+                table = build_status_table(current_fps, current_send_fps, last_mit_cmd, vr_data, vr_calib, enable_real)
                 console.print(table)
             
             if viewer:

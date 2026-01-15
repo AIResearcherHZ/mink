@@ -201,6 +201,13 @@ class CANWorker:
         self.dm_mc = None
         self.lock = Lock()
         self.registered = False
+        # MIT命令覆盖缓存
+        self._latest_mit_cmd: Optional[Dict] = None
+        # 夹爪命令覆盖缓存
+        self._latest_gripper_cmd: Dict[int, Dict] = {}  # {gripper_id: cmd_dict}
+        # 复用线程池
+        import concurrent.futures
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
     def run(self):
         try:
@@ -216,32 +223,59 @@ class CANWorker:
 
         while True:
             try:
-                # 处理命令
-                try:
-                    msg = self.cmd_q.get_nowait()
-                    cmd = msg.get('cmd', '')
-                    
-                    if cmd == 'shutdown':
-                        self._disable_all()
+                # 1. 处理队列命令(批量取出，MIT命令覆盖)
+                while True:
+                    try:
+                        msg = self.cmd_q.get_nowait()
+                        cmd = msg.get('cmd', '')
+                        if cmd == 'shutdown':
+                            self._disable_all()
+                            return
+                        elif cmd == 'disable_all':
+                            self._disable_all()
+                        elif cmd == 'register':
+                            self._register_motors()
+                        elif cmd == 'mit':
+                            # MIT命令覆盖策略
+                            joints = msg.get('joints', {})
+                            if self._latest_mit_cmd is None:
+                                self._latest_mit_cmd = joints
+                            else:
+                                self._latest_mit_cmd.update(joints)
+                        elif cmd == 'pos':
+                            self._pos(msg.get('joints', {}))
+                        elif cmd == 'gripper_oc':
+                            # 夹爪命令覆盖策略
+                            gripper_id = msg.get('gripper_id')
+                            self._latest_gripper_cmd[gripper_id] = {'type': 'oc', 'close': msg.get('close', False)}
+                        elif cmd == 'gripper_pos':
+                            gripper_id = msg.get('gripper_id')
+                            self._latest_gripper_cmd[gripper_id] = {'type': 'pos', 'percent': msg.get('percent', 0)}
+                        elif cmd == 'gripper_mit':
+                            gripper_id = msg.get('gripper_id')
+                            self._latest_gripper_cmd[gripper_id] = {'type': 'mit', 'percent': msg.get('percent', 0), 'kp': msg.get('kp'), 'kd': msg.get('kd')}
+                    except Empty:
                         break
-                    elif cmd == 'disable_all':
-                        self._disable_all()
-                    elif cmd == 'register':
-                        self._register_motors()
-                    elif cmd == 'mit':
-                        self._mit(msg.get('joints', {}))
-                    elif cmd == 'pos':
-                        self._pos(msg.get('joints', {}))
-                    elif cmd == 'gripper_oc':
-                        self._gripper_oc(msg.get('gripper_id'), msg.get('close', False))
-                    elif cmd == 'gripper_pos':
-                        self._gripper_pos(msg.get('gripper_id'), msg.get('percent', 0))
-                    elif cmd == 'gripper_mit':
-                        self._gripper_mit(msg.get('gripper_id'), msg.get('percent', 0), msg.get('kp'), msg.get('kd'))
-                except Empty:
-                    pass
                 
-                # 定期查询电机状态
+                # 2. 执行最新MIT命令
+                if self._latest_mit_cmd:
+                    self._mit(self._latest_mit_cmd)
+                    self._latest_mit_cmd = None
+                
+                # 3. 执行最新夹爪命令
+                if self._latest_gripper_cmd:
+                    gripper_cmds = dict(self._latest_gripper_cmd)
+                    self._latest_gripper_cmd.clear()
+                    for gripper_id, cmd_data in gripper_cmds.items():
+                        cmd_type = cmd_data.get('type')
+                        if cmd_type == 'oc':
+                            self._gripper_oc(gripper_id, cmd_data.get('close', False))
+                        elif cmd_type == 'pos':
+                            self._gripper_pos(gripper_id, cmd_data.get('percent', 0))
+                        elif cmd_type == 'mit':
+                            self._gripper_mit(gripper_id, cmd_data.get('percent', 0), cmd_data.get('kp'), cmd_data.get('kd'))
+                
+                # 4. 定期查询电机状态
                 now = time.perf_counter()
                 if self.registered and now - last_query_time >= query_interval:
                     result = self._query([])
@@ -259,7 +293,7 @@ class CANWorker:
                                 pass
                     last_query_time = now
                 else:
-                    time.sleep(0.001)
+                    time.sleep(0.001) 
                     
             except Exception as e:
                 print(f"CAN错误 {self.name}: {e}")
@@ -295,26 +329,31 @@ class CANWorker:
         with self.lock:
             if not jids:
                 jids = list(self.motors.keys())
-            
+            motors_to_query = [(jid, self.motors[jid]) for jid in jids if jid in self.motors]
+        
+        def query_motor(args):
+            jid, (motor, mc) = args
+            try:
+                mc.refresh_motor_status(motor)
+                mc.recv()
+                return (str(jid), {
+                    'pos': float(motor.getPosition() or 0),
+                    'vel': float(motor.getVelocity() or 0),
+                    'tau': float(motor.getTorque() or 0)
+                })
+            except:
+                return (str(jid), {'pos': 0, 'vel': 0, 'tau': 0})
+        
+        if motors_to_query:
+            results = list(self._executor.map(query_motor, motors_to_query))
+            result = dict(results)
+        else:
             result = {}
-            for jid in jids:
-                if jid not in self.motors:
-                    continue
-                motor, mc = self.motors[jid]
-                try:
-                    mc.refresh_motor_status(motor)
-                    mc.recv()
-                    result[str(jid)] = {
-                        'pos': float(motor.getPosition() or 0),
-                        'vel': float(motor.getVelocity() or 0),
-                        'tau': float(motor.getTorque() or 0)
-                    }
-                except:
-                    result[str(jid)] = {'pos': 0, 'vel': 0, 'tau': 0}
-            
-            return {'ok': True, 'joints': result}
+        
+        return {'ok': True, 'joints': result}
 
     def _mit(self, joints: dict):
+        control_tasks = []
         with self.lock:
             for jid, p in joints.items():
                 jid = int(jid)
@@ -325,9 +364,17 @@ class CANWorker:
                 q = p.get('q', 0)
                 kp = p.get('kp') if p.get('kp') is not None else cfg[1]
                 kd = p.get('kd') if p.get('kd') is not None else cfg[2]
-                mc.controlMIT(motor, kp, kd, q, p.get('dq', 0), p.get('tau', 0))
+                control_tasks.append((motor, mc, kp, kd, q, p.get('dq', 0), p.get('tau', 0)))
+        
+        def send_mit(args):
+            motor, mc, kp, kd, q, dq, tau = args
+            mc.controlMIT(motor, kp, kd, q, dq, tau)
+        
+        if control_tasks:
+            list(self._executor.map(send_mit, control_tasks))
 
     def _pos(self, joints: dict):
+        control_tasks = []
         with self.lock:
             for jid, val in joints.items():
                 jid = int(jid)
@@ -335,7 +382,14 @@ class CANWorker:
                     continue
                 motor, mc = self.motors[jid]
                 cfg = JOINT_CONFIG.get(jid, (None, 5.0, 1.0))
-                mc.controlMIT(motor, cfg[1], cfg[2], val, 0, 0)
+                control_tasks.append((motor, mc, cfg[1], cfg[2], val))
+        
+        def send_pos(args):
+            motor, mc, kp, kd, pos = args
+            mc.controlMIT(motor, kp, kd, pos, 0, 0)
+        
+        if control_tasks:
+            list(self._executor.map(send_pos, control_tasks))
 
     def _disable_all(self):
         for jid, (motor, mc) in self.motors.items():
@@ -346,6 +400,9 @@ class CANWorker:
             except:
                 pass
         self.registered = False
+        # 关闭线程池
+        if hasattr(self, '_executor'):
+            self._executor.shutdown(wait=False)
         print(f"✓ {self.name} 电机已失能")
 
     def _get_gripper_direction(self, gripper_id: int) -> int:
