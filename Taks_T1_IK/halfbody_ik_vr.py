@@ -76,6 +76,13 @@ RAMP_DOWN_TIME = 5.0
 FEEDFORWARD_SCALE = 0.8
 RAMP_EXPONENT = 2.0
 
+# 安全倒向配置: 停止时主动倒向此方向
+SAFE_FALL_POSITIONS = {
+    17: 0.0,   # waist_yaw: 保持中位
+    18: 0.5,  # waist_roll: 微向右倒
+    19: -0.42, # waist_pitch: 微向后倒
+}
+
 # 末端执行器: (link, mocap, limbs)
 END_EFFECTORS = {
     "left_hand": ("left_wrist_pitch_link", "left_hand_target", ["left_arm"]),
@@ -471,15 +478,21 @@ class HalfBodyIKController:
                 kp_safe, kd_safe = SAFE_KP_KD.get(sdk_id, (5.0, 1.0))
                 kp_val = kp_safe + (kp_target - kp_safe) * kp_kd_scale
                 kd_val = kd_safe + (kd_target - kd_safe) * kp_kd_scale
-                q_val = start_positions.get(sdk_id, 0.0)
+                # 使用安全倒向位置(如果配置了)
+                start_q = start_positions.get(sdk_id, 0.0)
+                target_q = SAFE_FALL_POSITIONS.get(sdk_id, start_q)
+                q_val = start_q + (target_q - start_q) * t
                 mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': 0.0, 'kp': kp_val, 'kd': kd_val}
             self.robot.controlMIT(mit_cmd)
             time.sleep(0.001)
         
-        # 失能
-        mit_cmd = {info['sdk_id']: {'q': start_positions.get(info['sdk_id'], 0.0), 
-                                     'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0} 
-                   for info in self.joint_mapping.values()}
+        # 失能(使用最终的安全倒向位置)
+        mit_cmd = {}
+        for info in self.joint_mapping.values():
+            sdk_id = info['sdk_id']
+            start_q = start_positions.get(sdk_id, 0.0)
+            target_q = SAFE_FALL_POSITIONS.get(sdk_id, start_q)
+            mit_cmd[sdk_id] = {'q': target_q, 'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0}
         self.robot.controlMIT(mit_cmd)
         print("[Ramp Down] 已降低到安全kp/kd并失能")
     

@@ -13,7 +13,7 @@ from typing import Optional, Callable
 UDP_IP = "0.0.0.0"
 UDP_PORT = 7000
 BUFFER_SIZE = 4096
-EMA_ALPHA = 0.5  # EMA平滑系数(0.3-0.5平滑, 0.6-0.8快速响应)
+EMA_ALPHA = 0.9  # EMA平滑系数(0.3-0.5平滑, 0.6-0.8快速响应)
 
 
 @dataclass

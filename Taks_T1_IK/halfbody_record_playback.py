@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from halfbody_ik_vr import (
     HalfBodyIKController, SDK_JOINT_GAINS, SAFE_KP_KD, SDK_ID_TO_NAME,
     TAKS_SEND_RATE, RAMP_UP_TIME, RAMP_DOWN_TIME, ease_in, ease_out,
-    JOINT_NAME_TO_SDK_ID, _XML
+    JOINT_NAME_TO_SDK_ID, _XML, SAFE_FALL_POSITIONS
 )
 from taks_sdk import taks
 
@@ -433,16 +433,21 @@ class Player:
                 kp_safe, kd_safe = SAFE_KP_KD.get(sdk_id, (5.0, 1.0))
                 kp_val = kp_safe + (kp_target - kp_safe) * kp_kd_scale
                 kd_val = kd_safe + (kd_target - kd_safe) * kp_kd_scale
-                q_val = start_positions.get(sdk_id, 0.0)
+                # 使用安全倒向位置(如果配置了)
+                start_q = start_positions.get(sdk_id, 0.0)
+                target_q = SAFE_FALL_POSITIONS.get(sdk_id, start_q)
+                q_val = start_q + (target_q - start_q) * t
                 mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': 0.0, 'kp': kp_val, 'kd': kd_val}
             
             self.robot.controlMIT(mit_cmd)
             time.sleep(0.001)
         
-        # 失能
-        mit_cmd = {sdk_id: {'q': start_positions.get(sdk_id, 0.0), 
-                            'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0} 
-                   for sdk_id in start_positions.keys()}
+        # 失能(使用最终的安全倒向位置)
+        mit_cmd = {}
+        for sdk_id in start_positions.keys():
+            start_q = start_positions.get(sdk_id, 0.0)
+            target_q = SAFE_FALL_POSITIONS.get(sdk_id, start_q)
+            mit_cmd[sdk_id] = {'q': target_q, 'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0}
         self.robot.controlMIT(mit_cmd)
         print("[回放] 缓停止完成")
     

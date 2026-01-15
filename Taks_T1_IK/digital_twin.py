@@ -106,8 +106,8 @@ RAMP_DOWN_TIME = 5.0  # 缓停止时间(秒)
 # 安全倒向配置: 停止时主动倒向此方向
 SAFE_FALL_POSITIONS = {
     17: 0.0,   # waist_yaw: 保持中位
-    18: 0.15,  # waist_roll: 微向右倒
-    19: -0.20, # waist_pitch: 微向后倒
+    18: 0.5,  # waist_roll: 微向右倒
+    19: -0.42, # waist_pitch: 微向后倒
 }
 
 # 安全模式 kp/kd (缓停止结束时的目标值)
