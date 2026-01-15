@@ -345,12 +345,17 @@ class MotorServer:
                 list(executor.map(disable_motor, motors_to_disable))
         
         with self.motor_lock:
-            if set(joint_ids) == set(self.motors.keys()):
-                self.motors.clear()
+            # 从motors字典中移除已失能的电机
+            for jid, _ in motors_to_disable:
+                if jid in self.motors:
+                    del self.motors[jid]
+            # 如果所有电机都被失能，重置registered标志
+            if not self.motors:
                 self.registered = False
         
+        disabled_ids = [jid for jid, _ in motors_to_disable]
         elapsed = (time.perf_counter() - start_time) * 1000
-        print(f"✓ 电机已失能 (耗时 {elapsed:.1f}ms)")
+        print(f"✓ 电机已失能: {disabled_ids} (耗时 {elapsed:.1f}ms)")
 
     def _get_gripper_direction(self, gripper_id: int) -> int:
         if gripper_id == LEFT_GRIPPER_ID:
@@ -373,7 +378,8 @@ class MotorServer:
                     if cmd == 'register':
                         self._register_motors(msg.get('joint_ids', ALL_JOINT_IDS))
                     elif cmd == 'disable_all':
-                        self._disable_motors()
+                        joint_ids = msg.get('joint_ids')
+                        self._disable_motors(joint_ids if joint_ids else None)
                 except Empty:
                     pass
                 
@@ -585,7 +591,8 @@ class MotorServer:
                 self._safe_queue_put({'cmd': 'register', 'joint_ids': target_joints}, priority=True)
                 print(f"✓ 客户端注册设备: {device}")
             elif cmd == 'disable_all':
-                self._safe_queue_put({'cmd': 'disable_all'}, priority=True)
+                self._safe_queue_put({'cmd': 'disable_all', 'joint_ids': target_joints}, priority=True)
+                print(f"✓ 收到失能命令: {device} -> 关节{target_joints}")
             elif cmd == 'mit':
                 joints = msg.get('joints', {})
                 joints = {int(k): v for k, v in joints.items()}

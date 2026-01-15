@@ -392,6 +392,7 @@ class CANWorker:
             list(self._executor.map(send_pos, control_tasks))
 
     def _disable_all(self):
+        disabled_ids = list(self.motors.keys())
         for jid, (motor, mc) in self.motors.items():
             try:
                 mc.controlMIT(motor, 0, 0, 0, 0, 0)
@@ -399,11 +400,12 @@ class CANWorker:
                 mc.disable(motor)
             except:
                 pass
+        self.motors.clear()
         self.registered = False
         # 关闭线程池
         if hasattr(self, '_executor'):
             self._executor.shutdown(wait=False)
-        print(f"✓ {self.name} 电机已失能")
+        print(f"✓ {self.name} 电机已失能: {disabled_ids}")
 
     def _get_gripper_direction(self, gripper_id: int) -> int:
         """获取夹爪方向系数"""

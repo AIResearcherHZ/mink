@@ -102,6 +102,7 @@ LEFT_GRIPPER_ID = 16   # 左手夹爪
 _session: Optional[zenoh.Session] = None
 _server_locator: Optional[str] = None
 _lock = threading.Lock()
+_registered_devices: list = []  # 追踪已注册的设备类型
 
 # 订阅者
 _sub_motor = None
@@ -177,16 +178,18 @@ def connect(address: str = None, cmd_port: int = 5555, wait_data: bool = True, t
 
 def disconnect():
     """断开连接"""
-    global _session, _server_locator, _sub_motor, _sub_imu, _motor_state, _imu_state
+    global _session, _server_locator, _sub_motor, _sub_imu, _motor_state, _imu_state, _registered_devices
     
-    # 失能电机
-    if _session:
+    # 失能所有已注册的设备
+    if _session and _registered_devices:
         try:
-            for device_type in ["Taks-T1", "Taks-T1-semibody"]:
-                _send_cmd(device_type, "disable_all")
+            for device_type in _registered_devices:
+                if device_type != "Taks-T1-imu":  # IMU无需失能
+                    _send_cmd(device_type, "disable_all")
+                    print(f"✓ 发送失能命令: {device_type}")
             time.sleep(0.5)
-        except:
-            pass
+        except Exception as e:
+            print(f"✗ 失能命令发送失败: {e}")
     
     if _sub_motor:
         _sub_motor.undeclare()
@@ -201,6 +204,7 @@ def disconnect():
     _server_locator = None
     _motor_state = {}
     _imu_state = {}
+    _registered_devices = []
 
 
 def _send_cmd(device: str, cmd: str, payload: dict = None):
@@ -423,6 +427,7 @@ class GripperDevice:
 # ============ 全局函数 ============
 def register(device_type: str):
     """注册设备"""
+    global _registered_devices
     if device_type == "Taks-T1-imu":
         dev = IMUDevice()
     elif device_type == "Taks-T1-rightgripper":
@@ -432,4 +437,6 @@ def register(device_type: str):
     else:
         dev = TaksDevice(device_type)
     dev._register()
+    if device_type not in _registered_devices:
+        _registered_devices.append(device_type)
     return dev

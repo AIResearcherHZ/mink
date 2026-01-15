@@ -474,7 +474,7 @@ class HalfBodyIKController:
                 q_val = start_positions.get(sdk_id, 0.0)
                 mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': 0.0, 'kp': kp_val, 'kd': kd_val}
             self.robot.controlMIT(mit_cmd)
-            time.sleep(0.005)
+            time.sleep(0.001)
         
         # 失能
         mit_cmd = {info['sdk_id']: {'q': start_positions.get(info['sdk_id'], 0.0), 
