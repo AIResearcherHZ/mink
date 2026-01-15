@@ -15,8 +15,6 @@ import mujoco.viewer
 from loop_rate_limiters import RateLimiter
 import mink
 import time
-from rich.console import Console
-from rich.table import Table
 
 sys.path.insert(0, str(Path(__file__).parent))
 from vr_interface import VRReceiver
@@ -45,20 +43,28 @@ JOINT_NAME_TO_SDK_ID = {
 }
 
 # 全局关节默认KP/KD
+# SDK_JOINT_GAINS = {
+#     1: (20, 5), 2: (20, 5), 3: (20, 5), 4: (20, 5),
+#     5: (10, 1), 6: (10, 1), 7: (10, 1), 8: (1.5, 0.1),
+#     9: (20, 5), 10: (20, 5), 11: (20, 5), 12: (20, 5),
+#     13: (10, 1), 14: (10, 1), 15: (10, 1), 16: (1.5, 0.1),
+#     17: (150, 4), 18: (150, 4), 19: (150, 4),
+#     20: (1.5, 0.1), 21: (1.5, 0.1), 22: (1.5, 0.1),
+# }
+
 SDK_JOINT_GAINS = {
-    1: (20, 5), 2: (20, 5), 3: (20, 5), 4: (20, 5),
-    5: (10, 1), 6: (10, 1), 7: (10, 1), 8: (1.5, 0.1),
-    9: (20, 5), 10: (20, 5), 11: (20, 5), 12: (20, 5),
-    13: (10, 1), 14: (10, 1), 15: (10, 1), 16: (1.5, 0.1),
-    17: (150, 4), 18: (150, 4), 19: (150, 4),
+    1: (5, 1), 2: (5, 1), 3: (5, 1), 4: (5, 1),
+    5: (2.5, 1), 6: (2.5, 1), 7: (2.5, 1), 8: (1.5, 0.1),
+    9: (5, 1), 10: (5, 1), 11: (5, 1), 12: (5, 1),
+    13: (2.5, 1), 14: (2.5, 1), 15: (2.5, 1), 16: (1.5, 0.1),
+    17: (10, 1), 18: (10, 1), 19: (10, 1),
     20: (1.5, 0.1), 21: (1.5, 0.1), 22: (1.5, 0.1),
 }
 
 # 启停配置
-RAMP_UP_TIME = 3.0    # 缓启动时间(秒)
-RAMP_DOWN_TIME = 3.0  # 缓停止时间(秒)
+RAMP_UP_TIME = 5.0    # 缓启动时间(秒)
+RAMP_DOWN_TIME = 5.0  # 缓停止时间(秒)
 FEEDFORWARD_SCALE = 0.8  # 前馈补偿缩放(防止URDF质量偏差导致过补)
-DEBUG_TABLE = True  # 是否显示调试表格
 
 # 安全倒向配置: 停止时主动倒向此方向，避免断电后随机倒向四角冲击结构
 SAFE_FALL_POSITIONS = {
@@ -172,8 +178,8 @@ def compute_lookat_quat(head_pos: np.ndarray, target_pos: np.ndarray) -> np.ndar
 
 def parse_args():
     parser = argparse.ArgumentParser(description="半身VR控制IK - SIM2REAL")
-    parser.add_argument("--headless", action="store_true", default=True, help="无头模式(无GUI)")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="taks服务器地址")
+    parser.add_argument("--headless", action="store_true", default=False, help="无头模式(无GUI)")
+    parser.add_argument("--host", type=str, default="10.80.242.44", help="taks服务器地址")
     parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
     parser.add_argument("--no-real", action="store_true", default=False, help="禁用真机控制(仅仿真)")
     parser.add_argument("--no-ramp-up", action="store_true", default=False, help="禁用缓启动")
@@ -308,8 +314,6 @@ def main():
     ramp_up_time = args.ramp_up_time
     ramp_down_time = args.ramp_down_time
     ramp_state = {"active": enable_ramp_up, "start_time": None, "progress": 0.0 if enable_ramp_up else 1.0, "start_positions": {}}
-    # 调试状态
-    debug_state = {"pos_errors": {}, "console": Console() if DEBUG_TABLE else None}
     
     def do_calibrate():
         vr_data = vr.data
@@ -363,9 +367,6 @@ def main():
             # 前馈扭矩应用缩放(启动阶段也按进度缩放)
             mit_cmd[sdk_id] = {'q': q_target, 'dq': 0.0, 'tau': tau_val * FEEDFORWARD_SCALE * kp_kd_scale, 
                               'kp': kp_val, 'kd': kd_val}
-            # 记录位置误差用于调试
-            if DEBUG_TABLE:
-                debug_state["pos_errors"][sdk_id] = {'target': q_target, 'cmd': q_target, 'kp': kp_val}
         if mit_cmd:
             robot.controlMIT(mit_cmd)
     
@@ -485,29 +486,6 @@ def main():
     # 注册信号处理
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
-    def print_debug_table():
-        """打印调试表格(临时调试用，未来删除)"""
-        if not DEBUG_TABLE or not debug_state["pos_errors"]:
-            return
-        table = Table(title="关节调试信息", show_header=True)
-        table.add_column("ID", style="cyan", width=4)
-        table.add_column("目标位置", style="green", width=10)
-        table.add_column("发送位置", style="yellow", width=10)
-        table.add_column("差值", style="red", width=10)
-        table.add_column("KP", style="magenta", width=8)
-        for sdk_id in sorted(debug_state["pos_errors"].keys()):
-            info = debug_state["pos_errors"][sdk_id]
-            diff = info['target'] - info['cmd']
-            table.add_row(
-                str(sdk_id),
-                f"{info['target']:.4f}",
-                f"{info['cmd']:.4f}",
-                f"{diff:.4f}",
-                f"{info['kp']:.1f}"
-            )
-        debug_state["console"].clear()
-        debug_state["console"].print(table)
     
     def control_loop(viewer=None):
         nonlocal print_counter, running
@@ -631,10 +609,7 @@ def main():
             print_counter += 1
             if print_counter >= 200:
                 print_counter = 0
-                if DEBUG_TABLE:
-                    print_debug_table()
-                else:
-                    print(f"[VR] Tracking={'ON' if vr_data.tracking_enabled else 'OFF'}, Calibrated={'YES' if vr_calib['done'] else 'NO'}, Real={'ON' if enable_real else 'OFF'}")
+                print(f"[VR] Tracking={'ON' if vr_data.tracking_enabled else 'OFF'}, Calibrated={'YES' if vr_calib['done'] else 'NO'}, Real={'ON' if enable_real else 'OFF'}")
             
             if viewer:
                 mujoco.mj_camlight(model, data)

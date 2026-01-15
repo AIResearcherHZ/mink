@@ -100,8 +100,8 @@ SDK_GAINS = {
 JOINT_STEP = 0.05
 
 # 启停配置
-RAMP_UP_TIME = 3.0    # 缓启动时间(秒)
-RAMP_DOWN_TIME = 3.0  # 缓停止时间(秒)
+RAMP_UP_TIME = 5.0    # 缓启动时间(秒)
+RAMP_DOWN_TIME = 5.0  # 缓停止时间(秒)
 
 # 安全倒向配置: 停止时主动倒向此方向
 SAFE_FALL_POSITIONS = {
