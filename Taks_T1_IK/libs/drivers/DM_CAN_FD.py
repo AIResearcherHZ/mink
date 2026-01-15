@@ -108,7 +108,7 @@ JOINT_TAU_LIMITS = {
 }
 
 # 安全模式开关: False=普通模式, True=安全模式 (默认普通模式)
-SAFE_MODE = True
+SAFE_MODE = False
 
 # 普通模式：KP和KD限位配置: joint_id -> (max_kp, max_kd)
 JOINT_KP_KD_LIMITS_NORMAL = {
@@ -181,19 +181,19 @@ JOINT_KP_KD_LIMITS_SAFE = {
     21: (1.5, 0.1),    # neck_roll
     22: (1.5, 0.1),    # neck_pitch
     # 右腿 (right_leg CAN)
-    23: (50, 50),    # right_hip_pitch
-    24: (150, 50),   # right_hip_roll
-    25: (150, 50),   # right_hip_yaw
-    26: (50, 50),    # right_knee
-    27: (40, 2),     # right_ankle_pitch
-    28: (40, 2),     # right_ankle_roll
+    23: (5, 1),    # right_hip_pitch
+    24: (10, 1),   # right_hip_roll
+    25: (10, 1),   # right_hip_yaw
+    26: (5, 1),    # right_knee
+    27: (5, 1),     # right_ankle_pitch
+    28: (5, 1),     # right_ankle_roll
     # 左腿 (left_leg CAN)
-    29: (50, 50),    # left_hip_pitch
-    30: (150, 50),   # left_hip_roll
-    31: (150, 50),   # left_hip_yaw
-    32: (50, 50),    # left_knee
-    33: (40, 2),     # left_ankle_pitch
-    34: (40, 2),     # left_ankle_roll
+    29: (5, 1),    # left_hip_pitch
+    30: (10, 1),   # left_hip_roll
+    31: (10, 1),   # left_hip_yaw
+    32: (5, 1),    # left_knee
+    33: (5, 1),     # left_ankle_pitch
+    34: (5, 1),     # left_ankle_roll
 }
 
 def get_kp_kd_limits():
