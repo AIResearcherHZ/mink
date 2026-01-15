@@ -102,7 +102,7 @@ LEFT_GRIPPER_ID = 16   # 左手夹爪
 _session: Optional[zenoh.Session] = None
 _server_locator: Optional[str] = None
 _lock = threading.Lock()
-_registered_devices: list = []  # 追踪已注册的设备类型
+_registered_devices: list = []
 
 # 订阅者
 _sub_motor = None
