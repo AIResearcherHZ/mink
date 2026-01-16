@@ -26,6 +26,7 @@ from rich.text import Text
 CAN_INTERFACE = "can1"  # SocketCAN 接口名
 UI_REFRESH_RATE = 10  # UI刷新频率 Hz (降低以保证流畅)
 CAN_POLL_INTERVAL = 0.05  # CAN轮询间隔 50ms (20Hz)
+CAN_RESPONSE_WAIT = 0.05  # 等待响应50ms (22个电机需要更长时间)
 
 # 预设的电机配置 (半身 22个电机: 0x01 ~ 0x16)
 PRESET_MOTOR_IDS = list(range(0x01, 0x17))  # 1~22
@@ -194,8 +195,10 @@ class CANCommThread(threading.Thread):
             except Exception:
                 pass
         
-        # 等待响应
-        time.sleep(0.05)
+        # 等待响应 - 电机多时需要更长等待
+        time.sleep(CAN_RESPONSE_WAIT)
+        self.motor_control.recv()
+        time.sleep(0.02)
         self.motor_control.recv()
     
     def _process_commands(self):
@@ -232,7 +235,10 @@ class CANCommThread(threading.Thread):
             except Exception:
                 pass
         
-        # 接收响应
+        # 接收响应 - 电机多时需要更长等待
+        time.sleep(CAN_RESPONSE_WAIT)
+        self.motor_control.recv()
+        # 再次接收确保所有响应都收到
         time.sleep(0.01)
         self.motor_control.recv()
         

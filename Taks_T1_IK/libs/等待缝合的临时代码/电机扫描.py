@@ -54,61 +54,59 @@ def scan_motors(interface='can1'):
     found_motors = []
     
     # 先清空接收缓冲区
-    time.sleep(0.1)
+    time.sleep(0.2)
     motor_ctrl.recv()
     
-    # 预先添加所有电机对象
+    # 扫描配置 - 电机多时需要更长间隔
+    SCAN_INTERVAL = 0.02  # 每个电机扫描间隔20ms
+    RESPONSE_WAIT = 0.05  # 等待响应50ms
+    MAX_RETRIES = 5  # 最大重试次数
+    
     motors = {}
-    for slave_id in range(0x01, 0x17):
-        master_id = slave_id + 0x80
-        test_motor = Motor(DM_Motor_Type.DM4340, SlaveID=slave_id, MasterID=master_id)
-        # 设置一个特殊的初始值用于检测是否收到响应
-        test_motor._initial_state = True
-        test_motor.state_q = float('nan')
-        motor_ctrl.addMotor(test_motor)
-        motors[slave_id] = test_motor
     
-    # 启动时先 enable 所有电机并写入 kp/kd=0
-    print(f"🔧 {Color.CYAN}初始化电机 (enable + controlMIT kp/kd=0)...{Color.END}")
-    for slave_id, motor in motors.items():
-        try:
-            motor_ctrl.enable(motor)
-            motor_ctrl.controlMIT(motor, 0.0, 0.0, 0.0, 0.0, 0.0)
-        except Exception:
-            pass
-    time.sleep(0.1)
-    motor_ctrl.recv()
-    
-    # 扫描 ID 0x01 到 0x16 (1 到 22)
+    # 逐个扫描 ID 0x01 到 0x16 (1 到 22)
     for slave_id in range(0x01, 0x17):
-        test_motor = motors[slave_id]
         part_name = get_body_part(slave_id)
         print(f"🔍 {Color.DARKCYAN}正在探测 ID: {hex(slave_id).ljust(4)} {part_name.ljust(30)}...{Color.END}", end='\r')
         
-        # 重置状态用于检测
+        # 为当前电机创建对象
+        master_id = slave_id + 0x80
+        test_motor = Motor(DM_Motor_Type.DM4340, SlaveID=slave_id, MasterID=master_id)
         test_motor.state_q = float('nan')
+        motor_ctrl.addMotor(test_motor)
+        motors[slave_id] = test_motor
         
-        # 多次尝试发送请求
-        max_retries = 3
+        # 先尝试enable
+        try:
+            motor_ctrl.enable(test_motor)
+            motor_ctrl.controlMIT(test_motor, 0.0, 0.0, 0.0, 0.0, 0.0)
+            time.sleep(SCAN_INTERVAL)
+        except Exception:
+            pass
+        
         detected = False
         
-        for retry in range(max_retries):
+        for retry in range(MAX_RETRIES):
+            # 清空缓冲区
+            motor_ctrl.recv()
+            
+            # 重置状态
+            test_motor.state_q = float('nan')
+            
             # 发送刷新状态指令
             motor_ctrl.refresh_motor_status(test_motor)
             
-            # 等待响应 - 串联电机需要更长时间
-            wait_time = 0.05  # 50ms 等待
-            for _ in range(10):  # 最多等待 500ms
-                time.sleep(wait_time)
-                motor_ctrl.recv()
-                
-                # 检查是否收到有效响应 (state_q 不再是 nan)
-                if not math.isnan(test_motor.state_q):
-                    detected = True
-                    break
+            # 等待响应
+            time.sleep(RESPONSE_WAIT)
+            motor_ctrl.recv()
             
-            if detected:
+            # 检查是否收到有效响应
+            if not math.isnan(test_motor.state_q):
+                detected = True
                 break
+            
+            # 重试前额外等待
+            time.sleep(SCAN_INTERVAL)
         
         # 检查是否检测到电机
         if not math.isnan(test_motor.state_q):
