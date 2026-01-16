@@ -105,8 +105,8 @@ RAMP_DOWN_TIME = 5.0  # 缓停止时间(秒)
 
 # 安全倒向配置: 停止时主动倒向此方向
 SAFE_FALL_POSITIONS = {
-    4: 1.2,     # right_elbow_joint
-    12: 1.2,    # left_elbow_joint
+    4: 0.2,     # right_elbow_joint
+    12: 0.2,    # left_elbow_joint
     17: 0.0,    # waist_yaw_joint
     18: 0.52,    # waist_roll_joint
     19: -0.45,  # waist_pitch_joint
