@@ -685,11 +685,15 @@ class HalfBodyIKController:
     def cleanup(self):
         """清理资源"""
         self.running = False
-        self.vr.stop()
+        print()  # 换行，避免无头模式下的\r残留
+        
+        # 先执行ramp_down（需要SDK通信），再关闭SDK
         if self.enable_real:
-            self.ramp_down()
+            self.ramp_down()  # 必须在SDK关闭前完成
             taks.disconnect()
             print("[TAKS] 已断开")
+        
+        # SDK进程必须在ramp_down之后关闭
         if self.sdk_proc is not None:
             print("[SDK] 关闭本机SDK服务端...")
             self.sdk_proc.terminate()
@@ -698,6 +702,9 @@ class HalfBodyIKController:
             except subprocess.TimeoutExpired:
                 self.sdk_proc.kill()
             print("[SDK] SDK服务端已关闭")
+        
+        # VR最后关闭
+        self.vr.stop()
     
     def run(self):
         """主运行循环"""
