@@ -26,7 +26,6 @@ from rich.text import Text
 CAN_INTERFACE = "can1"  # SocketCAN 接口名
 UI_REFRESH_RATE = 10  # UI刷新频率 Hz (降低以保证流畅)
 CAN_POLL_INTERVAL = 0.05  # CAN轮询间隔 50ms (20Hz)
-CAN_RESPONSE_WAIT = 0.05  # 等待响应50ms (22个电机需要更长时间)
 
 # 预设的电机配置 (半身 22个电机: 0x01 ~ 0x16)
 PRESET_MOTOR_IDS = list(range(0x01, 0x17))  # 1~22
@@ -195,10 +194,8 @@ class CANCommThread(threading.Thread):
             except Exception:
                 pass
         
-        # 等待响应 - 电机多时需要更长等待
-        time.sleep(CAN_RESPONSE_WAIT)
-        self.motor_control.recv()
-        time.sleep(0.02)
+        # 等待响应
+        time.sleep(0.05)
         self.motor_control.recv()
     
     def _process_commands(self):
@@ -235,10 +232,7 @@ class CANCommThread(threading.Thread):
             except Exception:
                 pass
         
-        # 接收响应 - 电机多时需要更长等待
-        time.sleep(CAN_RESPONSE_WAIT)
-        self.motor_control.recv()
-        # 再次接收确保所有响应都收到
+        # 接收响应
         time.sleep(0.01)
         self.motor_control.recv()
         
@@ -409,6 +403,8 @@ class MotorTable(Static):
         |deg|>90°: 反色警告
         正值用绿色系，负值用红色系
         """
+        if round(pos_deg, 1) == 0.0:
+            return "dim white"
         # 计算相对于参考值的偏差
         if motor_id in (0x0C, 0x04):
             ref_deg = -90.0
@@ -428,7 +424,7 @@ class MotorTable(Static):
             return "green3" if is_positive else "red3"
         elif abs_deg < 60:
             return "green1" if is_positive else "red1"
-        elif abs_deg < 90:
+        elif abs_deg <= 90:
             return "bold bright_green" if is_positive else "bold bright_red"
         else:
             # 绝对值超过90度: 反色警告 (包括>90和<-90)
@@ -437,11 +433,12 @@ class MotorTable(Static):
     def render_motor(self, motor_id: int, pos_rad: float, vel: float, tau: float):
         """渲染电机数据 (固定帧率调用，只在数据变化时更新UI)"""
         pos_deg = pos_rad * 180.0 / 3.14159265359
-        self.motor_data[motor_id] = (pos_rad, pos_deg, vel, tau)
+        pos_deg_display = round(pos_deg, 1)
+        self.motor_data[motor_id] = (pos_rad, pos_deg_display, vel, tau)
         
         # 格式化字符串
         rad_str = f"{pos_rad:+.3f}"
-        deg_str = f"{pos_deg:+.1f}"
+        deg_str = f"{pos_deg_display:+.1f}"
         vel_str = f"{vel:+.2f}"
         tau_str = f"{tau:+.2f}"
         
@@ -457,7 +454,7 @@ class MotorTable(Static):
             return
         
         # 获取颜色
-        color = self.get_degree_color(motor_id, pos_deg)
+        color = self.get_degree_color(motor_id, pos_deg_display)
         
         # 更新单元格 (使用缓存的 table 引用)
         try:
