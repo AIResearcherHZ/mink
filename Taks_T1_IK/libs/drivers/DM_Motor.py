@@ -3,6 +3,15 @@ import numpy as np
 from enum import IntEnum
 from struct import unpack
 from struct import pack
+from ankle_kinematics import ankle_ik, ankle_fk, motor_vel_to_ankle_vel, motor_tau_to_ankle_tau, ankle_vel_to_motor_vel, ankle_tau_to_motor_tau
+
+# 踝关节电机对配置: (pitch_id, roll_id, left_leg)
+ANKLE_PAIRS = {
+    (27, 28): False,  # 右踝: pitch=27, roll=28
+    (33, 34): True,   # 左踝: pitch=33, roll=34
+}
+# 踝关节电机ID集合
+ANKLE_MOTOR_IDS = {27, 28, 33, 34}
 
 # 关节软限位配置: joint_id -> (lower, upper) 单位: rad
 # 基于 Taks_T1.urdf 和 Taks_T1.xml
@@ -373,7 +382,7 @@ class MotorControl:
         data_buf[6] = ((kd_uint & 0xf) << 4) | ((tau_uint >> 8) & 0xf)
         data_buf[7] = tau_uint & 0xff
         self.__send_data(DM_Motor.SlaveID, data_buf)
-        print(f"[DEBUG] MIT控制: J{DM_Motor.SlaveID} (kp={kp}, kd={kd}) -> q={q:.6f}, dq={dq:.6f}, tau={tau:.6f}")
+        # print(f"[DEBUG] MIT控制: J{DM_Motor.SlaveID} (kp={kp}, kd={kd}) -> q={q:.6f}, dq={dq:.6f}, tau={tau:.6f}")
         self.recv()  # receive the data from serial port
 
     def control_delay(self, DM_Motor, kp: float, kd: float, q: float, dq: float, tau: float, delay: float):
@@ -389,6 +398,52 @@ class MotorControl:
         """
         self.controlMIT(DM_Motor, kp, kd, q, dq, tau)
         sleep(delay)
+
+    def controlMIT_ankle(self, motor_pitch, motor_roll, kp: float, kd: float, 
+                         pitch: float, roll: float, pitch_vel: float = 0, roll_vel: float = 0,
+                         tau_pitch: float = 0, tau_roll: float = 0):
+        """
+        踝关节MIT控制 - 输入踝关节pitch/roll，自动转换为电机角度
+        """
+        pitch_id, roll_id = motor_pitch.SlaveID, motor_roll.SlaveID
+        left_leg = ANKLE_PAIRS.get((pitch_id, roll_id), True)
+        theta1, theta2 = ankle_ik(pitch, roll, left_leg)
+        vel1, vel2 = ankle_vel_to_motor_vel(pitch, roll, pitch_vel, roll_vel, left_leg)
+        tau1, tau2 = ankle_tau_to_motor_tau(pitch, roll, tau_pitch, tau_roll, left_leg)
+        self.controlMIT(motor_pitch, kp, kd, theta1, vel1, tau1)
+        self.controlMIT(motor_roll, kp, kd, theta2, vel2, tau2)
+
+    def getAnklePosition(self, motor_pitch, motor_roll):
+        """获取踝关节位置 (pitch, roll)"""
+        pitch_id, roll_id = motor_pitch.SlaveID, motor_roll.SlaveID
+        left_leg = ANKLE_PAIRS.get((pitch_id, roll_id), True)
+        theta1, theta2 = motor_pitch.getPosition(), motor_roll.getPosition()
+        return ankle_fk(theta1, theta2, left_leg)
+
+    def getAnkleVelocity(self, motor_pitch, motor_roll):
+        """获取踝关节速度 (pitch_vel, roll_vel)"""
+        pitch_id, roll_id = motor_pitch.SlaveID, motor_roll.SlaveID
+        left_leg = ANKLE_PAIRS.get((pitch_id, roll_id), True)
+        theta1, theta2 = motor_pitch.getPosition(), motor_roll.getPosition()
+        pitch, roll = ankle_fk(theta1, theta2, left_leg)
+        vel1, vel2 = motor_pitch.getVelocity(), motor_roll.getVelocity()
+        return motor_vel_to_ankle_vel(pitch, roll, vel1, vel2, left_leg)
+
+    def getAnkleTorque(self, motor_pitch, motor_roll):
+        """获取踝关节力矩 (tau_pitch, tau_roll)"""
+        pitch_id, roll_id = motor_pitch.SlaveID, motor_roll.SlaveID
+        left_leg = ANKLE_PAIRS.get((pitch_id, roll_id), True)
+        theta1, theta2 = motor_pitch.getPosition(), motor_roll.getPosition()
+        pitch, roll = ankle_fk(theta1, theta2, left_leg)
+        tau1, tau2 = motor_pitch.getTorque(), motor_roll.getTorque()
+        return motor_tau_to_ankle_tau(pitch, roll, tau1, tau2, left_leg)
+
+    def getAnkleState(self, motor_pitch, motor_roll):
+        """获取踝关节完整状态 (pitch, roll, pitch_vel, roll_vel, tau_pitch, tau_roll)"""
+        pitch, roll = self.getAnklePosition(motor_pitch, motor_roll)
+        pitch_vel, roll_vel = self.getAnkleVelocity(motor_pitch, motor_roll)
+        tau_pitch, tau_roll = self.getAnkleTorque(motor_pitch, motor_roll)
+        return pitch, roll, pitch_vel, roll_vel, tau_pitch, tau_roll
 
     def control_Pos_Vel(self, Motor, P_desired: float, V_desired: float):
         """

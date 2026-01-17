@@ -14,6 +14,15 @@ from enum import IntEnum
 from struct import unpack, pack
 import can
 import threading
+from ankle_kinematics import ankle_ik, ankle_fk, motor_vel_to_ankle_vel, motor_tau_to_ankle_tau, ankle_vel_to_motor_vel, ankle_tau_to_motor_tau
+
+# 踝关节电机对配置: (pitch_id, roll_id, left_leg)
+ANKLE_PAIRS = {
+    (27, 28): False,  # 右踝: pitch=27, roll=28
+    (33, 34): True,   # 左踝: pitch=33, roll=34
+}
+# 踝关节电机ID集合
+ANKLE_MOTOR_IDS = {27, 28, 33, 34}
 
 # 关节软限位配置: joint_id -> (lower, upper) 单位: rad
 JOINT_POSITION_LIMITS = {
@@ -434,6 +443,107 @@ class MotorControlFD:
         """
         self.controlMIT(DM_Motor, kp, kd, q, dq, tau)
         sleep(delay)
+
+    def controlMIT_ankle(self, motor_pitch, motor_roll, kp: float, kd: float, 
+                         pitch: float, roll: float, pitch_vel: float = 0, roll_vel: float = 0,
+                         tau_pitch: float = 0, tau_roll: float = 0):
+        """
+        踝关节MIT控制 - 输入踝关节pitch/roll，自动转换为电机角度
+        :param motor_pitch: pitch电机对象 (ID 27或33)
+        :param motor_roll: roll电机对象 (ID 28或34)
+        :param kp: 位置增益
+        :param kd: 速度增益
+        :param pitch: 踝关节俯仰角 (rad)
+        :param roll: 踝关节横滚角 (rad)
+        :param pitch_vel: 踝关节俯仰角速度 (rad/s)
+        :param roll_vel: 踝关节横滚角速度 (rad/s)
+        :param tau_pitch: 踝关节俯仰力矩 (Nm)
+        :param tau_roll: 踝关节横滚力矩 (Nm)
+        """
+        pitch_id, roll_id = motor_pitch.SlaveID, motor_roll.SlaveID
+        left_leg = ANKLE_PAIRS.get((pitch_id, roll_id), True)
+        
+        # IK: 踝关节角度 -> 电机角度
+        theta1, theta2 = ankle_ik(pitch, roll, left_leg)
+        # 速度变换: 踝关节速度 -> 电机速度
+        vel1, vel2 = ankle_vel_to_motor_vel(pitch, roll, pitch_vel, roll_vel, left_leg)
+        # 力矩变换: 踝关节力矩 -> 电机力矩
+        tau1, tau2 = ankle_tau_to_motor_tau(pitch, roll, tau_pitch, tau_roll, left_leg)
+        
+        # 控制两个电机
+        self.controlMIT(motor_pitch, kp, kd, theta1, vel1, tau1)
+        self.controlMIT(motor_roll, kp, kd, theta2, vel2, tau2)
+
+    def getAnklePosition(self, motor_pitch, motor_roll):
+        """
+        获取踝关节位置 - 从电机角度转换为踝关节pitch/roll
+        :param motor_pitch: pitch电机对象
+        :param motor_roll: roll电机对象
+        :return: (pitch, roll) 踝关节角度 (rad)
+        """
+        pitch_id, roll_id = motor_pitch.SlaveID, motor_roll.SlaveID
+        left_leg = ANKLE_PAIRS.get((pitch_id, roll_id), True)
+        
+        theta1 = motor_pitch.getPosition()
+        theta2 = motor_roll.getPosition()
+        
+        # FK: 电机角度 -> 踝关节角度
+        pitch, roll = ankle_fk(theta1, theta2, left_leg)
+        return pitch, roll
+
+    def getAnkleVelocity(self, motor_pitch, motor_roll):
+        """
+        获取踝关节速度 - 从电机速度转换为踝关节角速度
+        :param motor_pitch: pitch电机对象
+        :param motor_roll: roll电机对象
+        :return: (pitch_vel, roll_vel) 踝关节角速度 (rad/s)
+        """
+        pitch_id, roll_id = motor_pitch.SlaveID, motor_roll.SlaveID
+        left_leg = ANKLE_PAIRS.get((pitch_id, roll_id), True)
+        
+        # 先获取当前踝关节位置用于雅可比计算
+        theta1 = motor_pitch.getPosition()
+        theta2 = motor_roll.getPosition()
+        pitch, roll = ankle_fk(theta1, theta2, left_leg)
+        
+        vel1 = motor_pitch.getVelocity()
+        vel2 = motor_roll.getVelocity()
+        
+        # 电机速度 -> 踝关节速度
+        pitch_vel, roll_vel = motor_vel_to_ankle_vel(pitch, roll, vel1, vel2, left_leg)
+        return pitch_vel, roll_vel
+
+    def getAnkleTorque(self, motor_pitch, motor_roll):
+        """
+        获取踝关节力矩 - 从电机力矩转换为踝关节力矩
+        :param motor_pitch: pitch电机对象
+        :param motor_roll: roll电机对象
+        :return: (tau_pitch, tau_roll) 踝关节力矩 (Nm)
+        """
+        pitch_id, roll_id = motor_pitch.SlaveID, motor_roll.SlaveID
+        left_leg = ANKLE_PAIRS.get((pitch_id, roll_id), True)
+        
+        # 先获取当前踝关节位置用于雅可比计算
+        theta1 = motor_pitch.getPosition()
+        theta2 = motor_roll.getPosition()
+        pitch, roll = ankle_fk(theta1, theta2, left_leg)
+        
+        tau1 = motor_pitch.getTorque()
+        tau2 = motor_roll.getTorque()
+        
+        # 电机力矩 -> 踝关节力矩
+        tau_pitch, tau_roll = motor_tau_to_ankle_tau(pitch, roll, tau1, tau2, left_leg)
+        return tau_pitch, tau_roll
+
+    def getAnkleState(self, motor_pitch, motor_roll):
+        """
+        获取踝关节完整状态 (位置、速度、力矩)
+        :return: (pitch, roll, pitch_vel, roll_vel, tau_pitch, tau_roll)
+        """
+        pitch, roll = self.getAnklePosition(motor_pitch, motor_roll)
+        pitch_vel, roll_vel = self.getAnkleVelocity(motor_pitch, motor_roll)
+        tau_pitch, tau_roll = self.getAnkleTorque(motor_pitch, motor_roll)
+        return pitch, roll, pitch_vel, roll_vel, tau_pitch, tau_roll
 
     def control_Pos_Vel(self, Motor, P_desired: float, V_desired: float):
         """

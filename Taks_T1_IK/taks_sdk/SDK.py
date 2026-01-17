@@ -94,7 +94,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from libs.drivers.DM_Motor import Motor as DM_Motor, MotorControl as DM_MotorControl, DM_Motor_Type, Control_Type
 from libs.drivers.DM_IMU import DM_IMU
-from libs.drivers.ankle_kinematics import ankle_ik, ankle_fk, motor_vel_to_ankle_vel, motor_tau_to_ankle_tau
 
 # ============ 夹爪配置 ============
 # 夹爪位置定义 (电机弧度位置)
@@ -350,10 +349,41 @@ class CANWorker:
         else:
             result = {}
         
+        # 踝关节运动学转换
+        ankle_pairs_to_convert = {}
+        for jid in list(result.keys()):
+            jid_int = int(jid)
+            if jid_int in ANKLE_MOTOR_IDS:
+                pair = (27, 28) if jid_int in (27, 28) else (33, 34)
+                if pair not in ankle_pairs_to_convert:
+                    ankle_pairs_to_convert[pair] = {}
+                if jid_int == pair[0]:  # pitch
+                    ankle_pairs_to_convert[pair]['pitch_id'] = jid
+                else:  # roll
+                    ankle_pairs_to_convert[pair]['roll_id'] = jid
+        
+        # 转换踝关节数据
+        for pair, ids in ankle_pairs_to_convert.items():
+            if 'pitch_id' in ids and 'roll_id' in ids:
+                pitch_id, roll_id = ids['pitch_id'], ids['roll_id']
+                with self.lock:
+                    if int(pitch_id) in self.motors and int(roll_id) in self.motors:
+                        m_pitch, mc = self.motors[int(pitch_id)]
+                        m_roll, _ = self.motors[int(roll_id)]
+                        try:
+                            pitch, roll = mc.getAnklePosition(m_pitch, m_roll)
+                            pitch_vel, roll_vel = mc.getAnkleVelocity(m_pitch, m_roll)
+                            tau_pitch, tau_roll = mc.getAnkleTorque(m_pitch, m_roll)
+                            result[pitch_id] = {'pos': pitch, 'vel': pitch_vel, 'tau': tau_pitch}
+                            result[roll_id] = {'pos': roll, 'vel': roll_vel, 'tau': tau_roll}
+                        except:
+                            pass
+        
         return {'ok': True, 'joints': result}
 
     def _mit(self, joints: dict):
         control_tasks = []
+        ankle_data = {}  # 收集踝关节数据: {(pitch_id, roll_id): {pitch_data, roll_data}}
         with self.lock:
             for jid, p in joints.items():
                 jid = int(jid)
@@ -364,17 +394,39 @@ class CANWorker:
                 q = p.get('q', 0)
                 kp = p.get('kp') if p.get('kp') is not None else cfg[1]
                 kd = p.get('kd') if p.get('kd') is not None else cfg[2]
-                control_tasks.append((motor, mc, kp, kd, q, p.get('dq', 0), p.get('tau', 0)))
+                dq = p.get('dq', 0)
+                tau = p.get('tau', 0)
+                
+                # 踝关节特殊处理
+                if jid in ANKLE_MOTOR_IDS:
+                    pair = (27, 28) if jid in (27, 28) else (33, 34)
+                    if pair not in ankle_data:
+                        ankle_data[pair] = {'mc': mc}
+                    if jid == pair[0]:  # pitch
+                        ankle_data[pair]['pitch'] = (motor, q, dq, tau, kp, kd)
+                    else:  # roll
+                        ankle_data[pair]['roll'] = (motor, q, dq, tau, kp, kd)
+                else:
+                    control_tasks.append((motor, mc, kp, kd, q, dq, tau))
         
         def send_mit(args):
             motor, mc, kp, kd, q, dq, tau = args
             mc.controlMIT(motor, kp, kd, q, dq, tau)
+        
+        # 处理踝关节
+        for pair, data in ankle_data.items():
+            if 'pitch' in data and 'roll' in data:
+                mc = data['mc']
+                m_pitch, pitch, pitch_vel, tau_pitch, kp, kd = data['pitch']
+                m_roll, roll, roll_vel, tau_roll, _, _ = data['roll']
+                mc.controlMIT_ankle(m_pitch, m_roll, kp, kd, pitch, roll, pitch_vel, roll_vel, tau_pitch, tau_roll)
         
         if control_tasks:
             list(self._executor.map(send_mit, control_tasks))
 
     def _pos(self, joints: dict):
         control_tasks = []
+        ankle_data = {}  # 收集踝关节数据
         with self.lock:
             for jid, val in joints.items():
                 jid = int(jid)
@@ -382,11 +434,30 @@ class CANWorker:
                     continue
                 motor, mc = self.motors[jid]
                 cfg = JOINT_CONFIG.get(jid, (None, 5.0, 1.0))
-                control_tasks.append((motor, mc, cfg[1], cfg[2], val))
+                
+                # 踝关节特殊处理
+                if jid in ANKLE_MOTOR_IDS:
+                    pair = (27, 28) if jid in (27, 28) else (33, 34)
+                    if pair not in ankle_data:
+                        ankle_data[pair] = {'mc': mc, 'kp': cfg[1], 'kd': cfg[2]}
+                    if jid == pair[0]:  # pitch
+                        ankle_data[pair]['pitch'] = (motor, val)
+                    else:  # roll
+                        ankle_data[pair]['roll'] = (motor, val)
+                else:
+                    control_tasks.append((motor, mc, cfg[1], cfg[2], val))
         
         def send_pos(args):
             motor, mc, kp, kd, pos = args
             mc.controlMIT(motor, kp, kd, pos, 0, 0)
+        
+        # 处理踝关节
+        for pair, data in ankle_data.items():
+            if 'pitch' in data and 'roll' in data:
+                mc = data['mc']
+                m_pitch, pitch = data['pitch']
+                m_roll, roll = data['roll']
+                mc.controlMIT_ankle(m_pitch, m_roll, data['kp'], data['kd'], pitch, roll)
         
         if control_tasks:
             list(self._executor.map(send_pos, control_tasks))
