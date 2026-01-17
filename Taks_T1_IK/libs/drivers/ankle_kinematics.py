@@ -1,219 +1,360 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-踝关节运动学解算模块
-- FK (Forward Kinematics): 电机角度 -> 脚踝 pitch/roll
+踝关节运动学解算模块 (异向摇臂并联机构)
+基于 close_chain_mapping.cpp / verify_kinematics.py 移植
 - IK (Inverse Kinematics): 脚踝 pitch/roll -> 电机角度
+- FK (Forward Kinematics): 电机角度 -> 脚踝 pitch/roll
 - 雅可比矩阵: 速度/力矩转换
 """
 
-import math
 import numpy as np
+from typing import Tuple, Dict, List, Optional
 
-# ============ 几何参数 ============
-D1 = 0.035
-D2 = 0.039625
-L1 = 0.039625
-H1 = 0.19
-H2 = 0.13
+# ============ 几何参数 (单位: mm) ============
+L_BAR = 35.0        # 短连杆(摇臂)长度
+L_ROD = np.array([190.0, 130.0])  # 两根作动杆长度 [上/长杆, 下/短杆]
+L_SPACING = 20.0    # y向偏置(左脚+, 右脚-)
+
+# 异向摇臂: 两个摇臂初始角度相反
+LONG_LINK_ANGLE_0 = 0.0              # 长杆摇臂初始角 (rad)
+SHORT_LINK_ANGLE_0 = np.pi           # 短杆摇臂初始角 (rad), 异向
+
+# 基座点A的z坐标(电机轴高度)
+A1_Z = 190.0  # 上电机轴高度
+A2_Z = 130.0  # 下电机轴高度
+
+# 平台点C的x坐标(足端铰点相对踝中心的前后偏移)
+C1_X = -35.0  # 长杆对应的C点x偏移
+C2_X = 35.0   # 短杆对应的C点x偏移
 
 
-def ankle_ik(pitch: float, roll: float) -> tuple:
+def _inverse_kinematics_full(q_roll: float, q_pitch: float, left_leg: bool = True) -> Dict:
     """
-    逆运动学：脚踝角度 -> 电机角度
-    
-    重要：参数顺序与参考文件不同！
-    - 参考文件 ankle_motor_to_real.py: ankle_inverse_kinematics(roll, pitch)
-    - 本函数: ankle_ik(pitch, roll)
-    
-    内部会自动处理参数映射，确保与机械结构一致。
+    完整逆运动学: 踝关节姿态 -> 电机角度及中间几何量
     
     Args:
-        pitch: 脚踝俯仰角 (rad)
-        roll: 脚踝横滚角 (rad)
+        q_roll: 踝关节横滚角 (rad), 绕x轴
+        q_pitch: 踝关节俯仰角 (rad), 绕y轴
+        left_leg: True=左脚, False=右脚
     
     Returns:
-        (theta_upper, theta_lower): 电机角度 (rad)
+        dict: 包含 THETA, r_A, r_B, r_C, r_bar, r_rod
     """
-    # 参数映射：公式中 theta_p 对应 roll，theta_r 对应 pitch
-    theta_p = roll
-    theta_r = pitch
+    l_bar = L_BAR
+    l_rod = L_ROD
+    l_spacing = L_SPACING if left_leg else -L_SPACING
     
-    d1, d2, L1, h1, h2 = D1, D2, 0.039625, H1, H2
-    a1, a2 = h1, h2
+    # B点初始位置(由摇臂角度决定)
+    r_B1_0_x = -l_bar * np.cos(LONG_LINK_ANGLE_0)
+    r_B1_0_z = A1_Z - l_bar * np.sin(LONG_LINK_ANGLE_0)
+    r_B2_0_x = -l_bar * np.cos(SHORT_LINK_ANGLE_0)
+    r_B2_0_z = A2_Z - l_bar * np.sin(SHORT_LINK_ANGLE_0)
     
-    sin_p, cos_p = math.sin(theta_p), math.cos(theta_p)
-    sin_r, cos_r = math.sin(theta_r), math.cos(theta_r)
+    # 定义初始点
+    r_A_0 = [
+        np.array([0.0, l_spacing, A1_Z]),
+        np.array([0.0, l_spacing, A2_Z])
+    ]
+    r_B_0 = [
+        np.array([r_B1_0_x, l_spacing, r_B1_0_z]),
+        np.array([r_B2_0_x, l_spacing, r_B2_0_z])
+    ]
+    r_C_0 = [
+        np.array([C1_X, l_spacing, 0.0]),
+        np.array([C2_X, l_spacing, 0.0])
+    ]
     
-    A_L = 2 * d2 * L1 * sin_p - 2 * L1 * d1 * sin_r - 2 * h2 * L1
-    A_R = -2 * d2 * L1 * sin_p - 2 * L1 * d1 * sin_r + 2 * h1 * L1
+    # 旋转矩阵: R_y(pitch) * R_x(roll)
+    cp, sp = np.cos(q_pitch), np.sin(q_pitch)
+    cr, sr = np.cos(q_roll), np.sin(q_roll)
     
-    B_L = 2 * d2 * L1 * cos_p
-    B_R = 2 * d2 * L1 * cos_p
+    R_y = np.array([
+        [cp, 0, sp],
+        [0, 1, 0],
+        [-sp, 0, cp]
+    ])
+    R_x = np.array([
+        [1, 0, 0],
+        [0, cr, -sr],
+        [0, sr, cr]
+    ])
+    x_rot = R_y @ R_x
     
-    C_L = (2 * d1 * d1 + h2 * h2 - a2 * a2 + L1 * L1 + d2 * d2 - 
-           2 * d1 * d1 * cos_r + 2 * d1 * h2 * sin_r - 
-           2 * d2 * h2 * sin_p - 2 * d1 * d2 * sin_p * sin_r)
-           
-    C_R = (2 * d1 * d1 + h1 * h1 - a1 * a1 + L1 * L1 + d2 * d2 - 
-           2 * d1 * d1 * cos_r - 2 * d1 * h1 * sin_r - 
-           2 * d2 * h1 * sin_p + 2 * d1 * d2 * sin_p * sin_r)
-
-    Len_L = A_L * A_L - C_L * C_L + B_L * B_L
-    Len_R = A_R * A_R - C_R * C_R + B_R * B_R
-
-    if Len_L > 0 and Len_R > 0:
-        theta_lower = 2 * math.atan((-A_L - math.sqrt(Len_L)) / (B_L + C_L))
-        theta_upper = 2 * math.atan((-A_R + math.sqrt(Len_R)) / (B_R + C_R))
-        theta_lower = -theta_lower
-        return theta_upper, theta_lower
+    result = {
+        'r_A': [], 'r_B': [], 'r_C': [],
+        'r_bar': [], 'r_rod': [], 'THETA': np.zeros(2)
+    }
     
-    return 0.0, 0.0
-
-
-def ankle_fk(theta_upper: float, theta_lower: float) -> tuple:
-    """
-    正运动学：电机角度 -> 脚踝角度
-    使用牛顿迭代法，高精度快速收敛
-    """
-    # 优化的初始猜测（线性回归系数）
-    pitch = 0.5504 * theta_upper - 0.5501 * theta_lower
-    roll = 0.4862 * theta_upper + 0.4866 * theta_lower
-    
-    # 牛顿迭代（通常2-3次收敛到高精度）
-    for _ in range(4):
-        calc_upper, calc_lower = ankle_ik(pitch, roll)
-        err_u = calc_upper - theta_upper
-        err_l = calc_lower - theta_lower
+    for i in range(2):
+        r_A_i = r_A_0[i]
+        r_C_i = x_rot @ r_C_0[i]  # 平台点随踝关节旋转
+        rBA_bar = r_B_0[i] - r_A_0[i]  # 初始摇臂向量
         
-        if err_u * err_u + err_l * err_l < 1e-20:
+        # 求解摇臂转角theta_i
+        a = r_C_i[0] - r_A_i[0]
+        b = r_A_i[2] - r_C_i[2]
+        c = (l_rod[i]**2 - l_bar**2 - np.sum((r_C_i - r_A_i)**2)) / (2 * l_bar)
+        
+        a_sq, b_sq, c_sq = a**2, b**2, c**2
+        ab_sq_sum = a_sq + b_sq
+        
+        discriminant = b_sq * c_sq - ab_sq_sum * (c_sq - a_sq)
+        if discriminant < 0:
+            discriminant = 0.0
+        
+        asin_arg = (b * c + np.sqrt(discriminant)) / ab_sq_sum
+        asin_arg = np.clip(asin_arg, -1.0, 1.0)
+        
+        theta_i = np.arcsin(asin_arg)
+        theta_i = theta_i if a < 0 else -theta_i
+        
+        # 计算旋转后的B点
+        ct, st = np.cos(theta_i), np.sin(theta_i)
+        R_y_theta = np.array([
+            [ct, 0, st],
+            [0, 1, 0],
+            [-st, 0, ct]
+        ])
+        
+        r_B_i = r_A_i + R_y_theta @ rBA_bar
+        r_bar_i = r_B_i - r_A_i
+        r_rod_i = r_C_i - r_B_i
+        
+        result['r_A'].append(r_A_i)
+        result['r_B'].append(r_B_i)
+        result['r_C'].append(r_C_i)
+        result['r_bar'].append(r_bar_i)
+        result['r_rod'].append(r_rod_i)
+        result['THETA'][i] = theta_i
+    
+    return result
+
+
+def _jacobian_full(r_C: List[np.ndarray], r_bar: List[np.ndarray], 
+                   r_rod: List[np.ndarray], q_pitch: float) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    计算雅可比矩阵
+    
+    Returns:
+        (J_motor2Joint, J_Joint2motor): 两个2x2矩阵
+    """
+    s_unit = np.array([0.0, 1.0, 0.0])
+    
+    # J_x: 2x6, 约束方程对末端位姿的偏导
+    J_x = np.zeros((2, 6))
+    J_x[0, 0:3] = r_rod[0]
+    J_x[0, 3:6] = np.cross(r_C[0], r_rod[0])
+    J_x[1, 0:3] = r_rod[1]
+    J_x[1, 3:6] = np.cross(r_C[1], r_rod[1])
+    
+    # J_theta: 2x2, 约束方程对电机角的偏导
+    J_theta = np.zeros((2, 2))
+    J_theta[0, 0] = np.dot(s_unit, np.cross(r_bar[0], r_rod[0]))
+    J_theta[1, 1] = np.dot(s_unit, np.cross(r_bar[1], r_rod[1]))
+    
+    # J_q: 6x2, 末端位姿对踝关节角的偏导 [roll, pitch]
+    cp, sp = np.cos(q_pitch), np.sin(q_pitch)
+    J_q = np.zeros((6, 2))
+    J_q[3, 1] = cp   # d(omega_x)/d(pitch)
+    J_q[4, 0] = 1.0  # d(omega_y)/d(roll)
+    J_q[5, 1] = -sp  # d(omega_z)/d(pitch)
+    
+    J_Temp = J_x @ J_q  # 2x2
+    
+    # J_motor2Joint = J_Temp^(-1) @ J_theta
+    # J_Joint2motor = J_theta^(-1) @ J_Temp
+    J_motor2Joint = np.linalg.solve(J_Temp, J_theta)
+    J_Joint2motor = np.linalg.solve(J_theta, J_Temp)
+    
+    return J_motor2Joint, J_Joint2motor
+
+
+# ============ 公开接口 ============
+
+def ankle_ik(pitch: float, roll: float, left_leg: bool = True) -> Tuple[float, float]:
+    """
+    逆运动学: 踝关节角度 -> 电机角度
+    
+    Args:
+        pitch: 踝关节俯仰角 (rad)
+        roll: 踝关节横滚角 (rad)
+        left_leg: True=左脚, False=右脚
+    
+    Returns:
+        (theta1, theta2): 两个电机角度 (rad)
+    """
+    result = _inverse_kinematics_full(roll, pitch, left_leg)
+    return float(result['THETA'][0]), float(result['THETA'][1])
+
+
+def ankle_fk(theta1: float, theta2: float, left_leg: bool = True,
+             initial_guess: Optional[Tuple[float, float]] = None) -> Tuple[float, float]:
+    """
+    正运动学: 电机角度 -> 踝关节角度 (牛顿迭代)
+    
+    Args:
+        theta1, theta2: 两个电机角度 (rad)
+        left_leg: True=左脚, False=右脚
+        initial_guess: 初始猜测 (pitch, roll), 可选
+    
+    Returns:
+        (pitch, roll): 踝关节角度 (rad)
+    """
+    theta_target = np.array([theta1, theta2])
+    
+    # 初始猜测
+    if initial_guess is not None:
+        x_c_k = np.array([initial_guess[0], initial_guess[1]])  # [pitch, roll]
+    else:
+        x_c_k = np.array([0.0, 0.0])
+    
+    MAX_ITERATIONS = 100
+    TOLERANCE = 1e-6
+    ALPHA = 0.5
+    
+    for _ in range(MAX_ITERATIONS):
+        current_pitch, current_roll = x_c_k[0], x_c_k[1]
+        
+        ik_result = _inverse_kinematics_full(current_roll, current_pitch, left_leg)
+        J_m2j, _ = _jacobian_full(ik_result['r_C'], ik_result['r_bar'], 
+                                   ik_result['r_rod'], current_pitch)
+        
+        f_error = theta_target - ik_result['THETA']
+        
+        if np.linalg.norm(f_error) < TOLERANCE:
             break
         
-        # 前向差分计算雅可比
-        up_p, lo_p = ankle_ik(pitch + 1e-7, roll)
-        up_r, lo_r = ankle_ik(pitch, roll + 1e-7)
-        
-        J00 = (up_p - calc_upper) * 1e7
-        J01 = (up_r - calc_upper) * 1e7
-        J10 = (lo_p - calc_lower) * 1e7
-        J11 = (lo_r - calc_lower) * 1e7
-        
-        det = J00 * J11 - J01 * J10
-        if abs(det) < 1e-12:
-            break
-        
-        inv_det = 1.0 / det
-        pitch -= inv_det * (J11 * err_u - J01 * err_l)
-        roll -= inv_det * (-J10 * err_u + J00 * err_l)
+        x_c_k = x_c_k + ALPHA * (J_m2j @ f_error)
     
-    return pitch, roll
+    return float(x_c_k[0]), float(x_c_k[1])  # pitch, roll
 
 
-def compute_jacobian_fast(pitch: float, roll: float) -> tuple:
-    """
-    计算雅可比矩阵 J = d(theta_motor) / d(ankle)
-    返回四个元素，避免numpy开销
-    
-    Returns:
-        (J00, J01, J10, J11): 雅可比矩阵元素
-           J00 = d(upper)/d(pitch), J01 = d(upper)/d(roll)
-           J10 = d(lower)/d(pitch), J11 = d(lower)/d(roll)
-    """
-    eps = 1e-6
-    inv_2eps = 0.5 / eps
-    
-    # 对 pitch 求偏导
-    up_pp, lo_pp = ankle_ik(pitch + eps, roll)
-    up_pm, lo_pm = ankle_ik(pitch - eps, roll)
-    J00 = (up_pp - up_pm) * inv_2eps
-    J10 = (lo_pp - lo_pm) * inv_2eps
-    
-    # 对 roll 求偏导
-    up_rp, lo_rp = ankle_ik(pitch, roll + eps)
-    up_rm, lo_rm = ankle_ik(pitch, roll - eps)
-    J01 = (up_rp - up_rm) * inv_2eps
-    J11 = (lo_rp - lo_rm) * inv_2eps
-    
-    return J00, J01, J10, J11
-
-
-def compute_jacobian(pitch: float, roll: float, eps: float = 1e-6) -> np.ndarray:
+def compute_jacobian(pitch: float, roll: float, left_leg: bool = True) -> np.ndarray:
     """
     计算雅可比矩阵 J = d(theta_motor) / d(ankle)
     
+    Args:
+        pitch: 踝关节俯仰角 (rad)
+        roll: 踝关节横滚角 (rad)
+        left_leg: True=左脚, False=右脚
+    
     Returns:
-        J: 2x2 矩阵
-           J[0,0] = d(upper)/d(pitch), J[0,1] = d(upper)/d(roll)
-           J[1,0] = d(lower)/d(pitch), J[1,1] = d(lower)/d(roll)
+        J: 2x2 矩阵, J_Joint2motor
     """
-    J00, J01, J10, J11 = compute_jacobian_fast(pitch, roll)
-    return np.array([[J00, J01], [J10, J11]])
+    ik_result = _inverse_kinematics_full(roll, pitch, left_leg)
+    _, J_j2m = _jacobian_full(ik_result['r_C'], ik_result['r_bar'],
+                              ik_result['r_rod'], pitch)
+    return J_j2m
 
 
-def motor_vel_to_ankle_vel(pitch: float, roll: float, 
-                           vel_upper: float, vel_lower: float) -> tuple:
+def compute_jacobian_both(pitch: float, roll: float, left_leg: bool = True) -> Tuple[np.ndarray, np.ndarray]:
     """
-    电机速度 -> 脚踝角速度
-    ankle_dot = J^(-1) * motor_dot
-    """
-    J00, J01, J10, J11 = compute_jacobian_fast(pitch, roll)
+    计算两个雅可比矩阵
     
-    # 2x2 矩阵求逆: det = J00*J11 - J01*J10
-    det = J00 * J11 - J01 * J10
-    if abs(det) < 1e-12:
-        return 0.0, 0.0
-    
-    inv_det = 1.0 / det
-    # J^(-1) = [[J11, -J01], [-J10, J00]] / det
-    pitch_vel = inv_det * (J11 * vel_upper - J01 * vel_lower)
-    roll_vel = inv_det * (-J10 * vel_upper + J00 * vel_lower)
-    
-    return pitch_vel, roll_vel
+    Returns:
+        (J_motor2Joint, J_Joint2motor)
+    """
+    ik_result = _inverse_kinematics_full(roll, pitch, left_leg)
+    return _jacobian_full(ik_result['r_C'], ik_result['r_bar'],
+                          ik_result['r_rod'], pitch)
 
 
-def motor_tau_to_ankle_tau(pitch: float, roll: float,
-                           tau_upper: float, tau_lower: float) -> tuple:
+def motor_vel_to_ankle_vel(pitch: float, roll: float,
+                           vel1: float, vel2: float, left_leg: bool = True) -> Tuple[float, float]:
     """
-    电机扭矩 -> 脚踝扭矩
-    tau_ankle = J^T * tau_motor
+    电机速度 -> 踝关节角速度
+    ankle_vel = J_motor2Joint @ motor_vel
     """
-    J00, J01, J10, J11 = compute_jacobian_fast(pitch, roll)
-    # J^T = [[J00, J10], [J01, J11]]
-    tau_pitch = J00 * tau_upper + J10 * tau_lower
-    tau_roll = J01 * tau_upper + J11 * tau_lower
-    return tau_pitch, tau_roll
+    J_m2j, _ = compute_jacobian_both(pitch, roll, left_leg)
+    motor_vel = np.array([vel1, vel2])
+    ankle_vel = J_m2j @ motor_vel
+    return float(ankle_vel[0]), float(ankle_vel[1])  # pitch_vel, roll_vel
 
 
 def ankle_vel_to_motor_vel(pitch: float, roll: float,
-                           pitch_vel: float, roll_vel: float) -> tuple:
+                           pitch_vel: float, roll_vel: float, left_leg: bool = True) -> Tuple[float, float]:
     """
-    脚踝角速度 -> 电机速度
-    motor_dot = J * ankle_dot
+    踝关节角速度 -> 电机速度
+    motor_vel = J_Joint2motor @ ankle_vel
     """
-    J00, J01, J10, J11 = compute_jacobian_fast(pitch, roll)
-    # J * [pitch_vel, roll_vel]^T
-    vel_upper = J00 * pitch_vel + J01 * roll_vel
-    vel_lower = J10 * pitch_vel + J11 * roll_vel
-    return vel_upper, vel_lower
+    _, J_j2m = compute_jacobian_both(pitch, roll, left_leg)
+    ankle_vel = np.array([pitch_vel, roll_vel])
+    motor_vel = J_j2m @ ankle_vel
+    return float(motor_vel[0]), float(motor_vel[1])
+
+
+def motor_tau_to_ankle_tau(pitch: float, roll: float,
+                           tau1: float, tau2: float, left_leg: bool = True) -> Tuple[float, float]:
+    """
+    电机扭矩 -> 踝关节扭矩
+    ankle_tau = J_Joint2motor^T @ motor_tau
+    """
+    _, J_j2m = compute_jacobian_both(pitch, roll, left_leg)
+    motor_tau = np.array([tau1, tau2])
+    ankle_tau = J_j2m.T @ motor_tau
+    return float(ankle_tau[0]), float(ankle_tau[1])
 
 
 def ankle_tau_to_motor_tau(pitch: float, roll: float,
-                           tau_pitch: float, tau_roll: float) -> tuple:
+                           tau_pitch: float, tau_roll: float, left_leg: bool = True) -> Tuple[float, float]:
     """
-    脚踝扭矩 -> 电机扭矩
-    tau_motor = (J^T)^(-1) * tau_ankle
+    踝关节扭矩 -> 电机扭矩
+    motor_tau = J_motor2Joint^T @ ankle_tau
     """
-    J00, J01, J10, J11 = compute_jacobian_fast(pitch, roll)
+    J_m2j, _ = compute_jacobian_both(pitch, roll, left_leg)
+    ankle_tau = np.array([tau_pitch, tau_roll])
+    motor_tau = J_m2j.T @ ankle_tau
+    return float(motor_tau[0]), float(motor_tau[1])
+
+
+if __name__ == '__main__':
+    print("=" * 60)
+    print("踝关节运动学测试 (异向摇臂)")
+    print("=" * 60)
     
-    # (J^T)^(-1): J^T = [[J00, J10], [J01, J11]]
-    # det(J^T) = J00*J11 - J10*J01 = det(J)
-    det = J00 * J11 - J01 * J10
-    if abs(det) < 1e-12:
-        return 0.0, 0.0
+    # 测试参数
+    test_pitch = np.deg2rad(10.0)
+    test_roll = np.deg2rad(5.0)
     
-    inv_det = 1.0 / det
-    # (J^T)^(-1) = [[J11, -J10], [-J01, J00]] / det
-    tau_upper = inv_det * (J11 * tau_pitch - J10 * tau_roll)
-    tau_lower = inv_det * (-J01 * tau_pitch + J00 * tau_roll)
+    print(f"\n输入: pitch={np.rad2deg(test_pitch):.2f}°, roll={np.rad2deg(test_roll):.2f}°")
     
-    return tau_upper, tau_lower
+    # 逆运动学
+    theta1, theta2 = ankle_ik(test_pitch, test_roll, left_leg=True)
+    print(f"IK结果: theta1={np.rad2deg(theta1):.4f}°, theta2={np.rad2deg(theta2):.4f}°")
+    
+    # 正运动学
+    pitch_fk, roll_fk = ankle_fk(theta1, theta2, left_leg=True)
+    print(f"FK结果: pitch={np.rad2deg(pitch_fk):.4f}°, roll={np.rad2deg(roll_fk):.4f}°")
+    
+    # 误差
+    err_pitch = abs(np.rad2deg(pitch_fk - test_pitch))
+    err_roll = abs(np.rad2deg(roll_fk - test_roll))
+    print(f"误差: pitch={err_pitch:.6f}°, roll={err_roll:.6f}°")
+    
+    # 雅可比
+    J_m2j, J_j2m = compute_jacobian_both(test_pitch, test_roll, left_leg=True)
+    print(f"\nJ_motor2Joint:\n{J_m2j}")
+    print(f"\nJ_Joint2motor:\n{J_j2m}")
+    
+    # 验证雅可比互逆
+    identity = J_m2j @ J_j2m
+    print(f"\nJ_m2j @ J_j2m (应为单位阵):\n{identity}")
+    
+    # 速度/力矩变换测试
+    test_vel = (0.1, 0.05)  # pitch_vel, roll_vel
+    motor_vel = ankle_vel_to_motor_vel(test_pitch, test_roll, *test_vel)
+    ankle_vel_back = motor_vel_to_ankle_vel(test_pitch, test_roll, *motor_vel)
+    print(f"\n速度变换: {test_vel} -> {motor_vel} -> {ankle_vel_back}")
+    
+    test_tau = (1.0, 0.5)  # tau_pitch, tau_roll
+    motor_tau = ankle_tau_to_motor_tau(test_pitch, test_roll, *test_tau)
+    ankle_tau_back = motor_tau_to_ankle_tau(test_pitch, test_roll, *motor_tau)
+    print(f"力矩变换: {test_tau} -> {motor_tau} -> {ankle_tau_back}")
+    
+    print("\n" + "=" * 60)
+    if err_pitch < 0.01 and err_roll < 0.01:
+        print("✓ 测试通过")
+    else:
+        print("✗ 测试失败")
+    print("=" * 60)
