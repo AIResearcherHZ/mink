@@ -72,7 +72,7 @@ JOINT_POSITION_LIMITS = {
 VEL_LIMIT = (-0.1, 0.1)
 
 # 需要反向的关节 (position, velocity, tau 都反向)
-REVERSED_JOINTS = {1, 3, 7, 11, 12, 18, 22, 23, 25, 27, 31, 32}
+REVERSED_JOINTS = {1, 3, 7, 11, 12, 18, 22, 23, 25, 31, 32}
 
 # 力矩限位配置: joint_id -> (min_tau, max_tau) 单位: Nm
 # 基于 Taks_T1.urdf 和 Taks_T1.xml 中的 effort 参数
