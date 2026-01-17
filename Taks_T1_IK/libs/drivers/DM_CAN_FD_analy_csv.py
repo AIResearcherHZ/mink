@@ -18,7 +18,14 @@ from enum import IntEnum
 from struct import unpack, pack
 import can
 import threading
-from ankle_kinematics import ankle_ik, ankle_fk, motor_vel_to_ankle_vel, motor_tau_to_ankle_tau, ankle_vel_to_motor_vel, ankle_tau_to_motor_tau
+from libs.drivers.ankle_kinematics import (
+    ankle_ik,
+    ankle_fk,
+    motor_vel_to_ankle_vel,
+    motor_tau_to_ankle_tau,
+    ankle_vel_to_motor_vel,
+    ankle_tau_to_motor_tau,
+)
 
 # 踝关节电机对配置: (pitch_id, roll_id, left_leg)
 ANKLE_PAIRS = {
