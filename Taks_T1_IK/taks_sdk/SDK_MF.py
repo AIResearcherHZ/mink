@@ -4,7 +4,7 @@
 Taks SDK 服务端 - Zenoh Pub/Sub版本 (CAN FD版)
 使用Zenoh Pub/Sub模式实现低延迟通信
 服务端持续发布IMU和电机状态，客户端订阅获取
-所有电机通过地瓜X5的can0接口通信
+所有电机通过地瓜X5的can1接口通信 (CAN FD)
 """
 
 import zenoh
@@ -17,6 +17,7 @@ from threading import Lock, Thread
 from queue import Queue, Empty, Full
 from multiprocessing import Process, Queue as MPQueue, Event as MPEvent
 from typing import Dict, List, Optional
+import concurrent.futures
 
 # CUDA检测
 HAS_CUDA = False
@@ -69,7 +70,6 @@ def _deserialize_msg(data: bytes) -> dict:
         if not isinstance(val, str):
             msg[name] = val
             continue
-        # 尝试还原dict/list
         if val.startswith('{') or val.startswith('['):
             try:
                 import ast
@@ -91,8 +91,8 @@ def _deserialize_msg(data: bytes) -> dict:
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from libs.drivers.DM_Motor import Motor as DM_Motor, MotorControl as DM_MotorControl, DM_Motor_Type, Control_Type
-from libs.drivers.DM_IMU import DM_IMU
+from DM_CAN_FD import Motor as DM_Motor, MotorControlFD as DM_MotorControl, DM_Motor_Type, Control_Type
+from DM_IMU import DM_IMU
 
 # ============ 夹爪配置 ============
 GRIPPER_OPEN = 0.0
@@ -124,6 +124,7 @@ JOINT_CONFIG = {
 }
 
 ANKLE_PAIRS = {27: (27, 28), 33: (33, 34)}
+ANKLE_MOTOR_IDS = {27, 28, 33, 34}
 
 CAN_JOINT_MAP = {
     'right_hand': [1, 2, 3, 4, 5, 6, 7, 8],
@@ -186,6 +187,269 @@ class IMUWorker:
                 time.sleep(0.01)
 
 
+# ============ 部位工作线程 ============
+class BodyPartWorker:
+    """处理单个部位(左手/右手/腰椎)的命令"""
+    def __init__(self, name: str, joint_ids: List[int], dm_mc: DM_MotorControl, 
+                 motors: Dict[int, DM_Motor], motor_lock: Lock):
+        self.name = name
+        self.joint_ids = joint_ids
+        self.dm_mc = dm_mc
+        self.motors = motors
+        self.motor_lock = motor_lock
+        self.running = True
+        self.registered = False
+        
+        # 命令队列
+        self.cmd_queue = Queue(maxsize=100)
+        # MIT命令覆盖缓存
+        self._latest_mit_cmd: Optional[Dict] = None
+        self._mit_lock = Lock()
+        # 夹爪命令覆盖缓存
+        self._latest_gripper_cmd: Dict[int, Dict] = {}
+        self._gripper_lock = Lock()
+        
+        self.thread = Thread(target=self._run, daemon=True)
+    
+    def start(self):
+        self.thread.start()
+    
+    def stop(self):
+        self.running = False
+    
+    def _run(self):
+        while self.running:
+            try:
+                # 1. 处理队列命令
+                while True:
+                    try:
+                        msg = self.cmd_queue.get_nowait()
+                        cmd = msg.get('cmd', '')
+                        if cmd == 'register':
+                            self._register_motors()
+                        elif cmd == 'disable_all':
+                            self._disable_motors()
+                        elif cmd == 'mit':
+                            joints = msg.get('joints', {})
+                            with self._mit_lock:
+                                if self._latest_mit_cmd is None:
+                                    self._latest_mit_cmd = joints
+                                else:
+                                    self._latest_mit_cmd.update(joints)
+                        elif cmd == 'gripper_oc':
+                            gripper_id = msg.get('gripper_id')
+                            with self._gripper_lock:
+                                self._latest_gripper_cmd[gripper_id] = {'type': 'oc', 'close': msg.get('close', False)}
+                        elif cmd == 'gripper_pos':
+                            gripper_id = msg.get('gripper_id')
+                            with self._gripper_lock:
+                                self._latest_gripper_cmd[gripper_id] = {'type': 'pos', 'percent': msg.get('percent', 0)}
+                        elif cmd == 'gripper_mit':
+                            gripper_id = msg.get('gripper_id')
+                            with self._gripper_lock:
+                                self._latest_gripper_cmd[gripper_id] = {
+                                    'type': 'mit', 'percent': msg.get('percent', 0),
+                                    'kp': msg.get('kp'), 'kd': msg.get('kd')
+                                }
+                    except Empty:
+                        break
+                
+                # 2. 执行最新MIT命令
+                with self._mit_lock:
+                    mit_cmd = self._latest_mit_cmd
+                    self._latest_mit_cmd = None
+                if mit_cmd:
+                    self._mit(mit_cmd)
+                
+                # 3. 执行最新夹爪命令
+                with self._gripper_lock:
+                    gripper_cmds = dict(self._latest_gripper_cmd)
+                    self._latest_gripper_cmd.clear()
+                for gripper_id, cmd_data in gripper_cmds.items():
+                    cmd_type = cmd_data.get('type')
+                    if cmd_type == 'oc':
+                        self._gripper_oc(gripper_id, cmd_data.get('close', False))
+                    elif cmd_type == 'pos':
+                        self._gripper_pos(gripper_id, cmd_data.get('percent', 0))
+                    elif cmd_type == 'mit':
+                        self._gripper_mit(gripper_id, cmd_data.get('percent', 0), 
+                                         cmd_data.get('kp'), cmd_data.get('kd'))
+                
+                # 无命令时短暂休眠
+                if not mit_cmd and not gripper_cmds:
+                    time.sleep(0.001)
+                    
+            except Exception as e:
+                print(f"{self.name} 命令处理错误: {e}")
+    
+    def _register_motors(self):
+        """注册并使能本部位的电机"""
+        start_time = time.perf_counter()
+        success_count = 0
+        
+        for jid in self.joint_ids:
+            cfg = JOINT_CONFIG.get(jid)
+            if not cfg:
+                continue
+            
+            with self.motor_lock:
+                if jid in self.motors:
+                    motor = self.motors[jid]
+                    try:
+                        self.dm_mc.switchControlMode(motor, Control_Type.MIT)
+                        self.dm_mc.enable(motor)
+                        success_count += 1
+                        print(f"✓ 电机 J{jid} 重新使能")
+                    except Exception as e:
+                        print(f"电机重新使能失败 J{jid}: {e}")
+                else:
+                    motor = DM_Motor(cfg[0], jid, jid + 0x80)
+                    self.dm_mc.addMotor(motor)
+                    try:
+                        self.dm_mc.switchControlMode(motor, Control_Type.MIT)
+                        self.dm_mc.enable(motor)
+                        self.motors[jid] = motor
+                        success_count += 1
+                        print(f"✓ 电机 J{jid} 使能成功")
+                    except Exception as e:
+                        print(f"电机使能失败 J{jid}: {e}")
+        
+        self.registered = success_count > 0
+        elapsed = (time.perf_counter() - start_time) * 1000
+        print(f"✓ {self.name} 注册 {success_count} 个电机 (耗时 {elapsed:.1f}ms)")
+    
+    def _disable_motors(self):
+        """失能本部位的电机"""
+        start_time = time.perf_counter()
+        disabled_ids = []
+        
+        for jid in self.joint_ids:
+            with self.motor_lock:
+                if jid not in self.motors:
+                    continue
+                motor = self.motors[jid]
+            try:
+                self.dm_mc.controlMIT(motor, 0, 0, 0, 0, 0)
+                time.sleep(0.01)
+                self.dm_mc.disable(motor)
+                disabled_ids.append(jid)
+            except:
+                pass
+        
+        with self.motor_lock:
+            for jid in disabled_ids:
+                if jid in self.motors:
+                    del self.motors[jid]
+        
+        self.registered = False
+        elapsed = (time.perf_counter() - start_time) * 1000
+        print(f"✓ {self.name} 电机已失能: {disabled_ids} (耗时 {elapsed:.1f}ms)")
+    
+    def _mit(self, joints: dict):
+        """MIT控制"""
+        ankle_data = {}
+        
+        for jid, p in joints.items():
+            jid = int(jid)
+            if jid not in self.joint_ids:
+                continue
+            
+            with self.motor_lock:
+                if jid not in self.motors:
+                    continue
+                motor = self.motors[jid]
+            
+            cfg = JOINT_CONFIG.get(jid, (None, 5.0, 1.0))
+            q = p.get('q', 0)
+            kp = p.get('kp') if p.get('kp') is not None else cfg[1]
+            kd = p.get('kd') if p.get('kd') is not None else cfg[2]
+            dq = p.get('dq', 0)
+            tau = p.get('tau', 0)
+            
+            # 踝关节特殊处理
+            if jid in ANKLE_MOTOR_IDS:
+                pair = (27, 28) if jid in (27, 28) else (33, 34)
+                if pair not in ankle_data:
+                    ankle_data[pair] = {}
+                if jid == pair[0]:  # pitch
+                    ankle_data[pair]['pitch'] = (motor, q, dq, tau, kp, kd)
+                else:  # roll
+                    ankle_data[pair]['roll'] = (motor, q, dq, tau, kp, kd)
+            else:
+                self.dm_mc.controlMIT(motor, kp, kd, q, dq, tau)
+                time.sleep(0.001)
+        
+        # 处理踝关节
+        for pair, data in ankle_data.items():
+            if 'pitch' in data and 'roll' in data:
+                m_pitch, pitch, pitch_vel, tau_pitch, kp, kd = data['pitch']
+                m_roll, roll, roll_vel, tau_roll, _, _ = data['roll']
+                self.dm_mc.controlMIT_ankle(m_pitch, m_roll, kp, kd, pitch, roll, 
+                                           pitch_vel, roll_vel, tau_pitch, tau_roll)
+                time.sleep(0.001)
+    
+    def _get_gripper_direction(self, gripper_id: int) -> int:
+        if gripper_id == LEFT_GRIPPER_ID:
+            return LEFT_GRIPPER_DIRECTION
+        return RIGHT_GRIPPER_DIRECTION
+
+    def _gripper_percent_to_pos(self, percent: float, gripper_id: int) -> float:
+        percent = max(0, min(100, percent))
+        pos = GRIPPER_OPEN + (GRIPPER_CLOSE - GRIPPER_OPEN) * (percent / 100.0)
+        return pos * self._get_gripper_direction(gripper_id)
+
+    def _gripper_oc(self, gripper_id: int, close: bool):
+        with self.motor_lock:
+            if gripper_id not in self.motors:
+                return
+            motor = self.motors[gripper_id]
+        cfg = JOINT_CONFIG.get(gripper_id, (None, 0.5, 0.05))
+        pos = GRIPPER_CLOSE if close else GRIPPER_OPEN
+        actual_pos = pos * self._get_gripper_direction(gripper_id)
+        self.dm_mc.controlMIT(motor, cfg[1], cfg[2], actual_pos, 0, 0)
+        time.sleep(0.001)
+
+    def _gripper_pos(self, gripper_id: int, percent: float):
+        with self.motor_lock:
+            if gripper_id not in self.motors:
+                return
+            motor = self.motors[gripper_id]
+        cfg = JOINT_CONFIG.get(gripper_id, (None, 0.5, 0.05))
+        actual_pos = self._gripper_percent_to_pos(percent, gripper_id)
+        self.dm_mc.controlMIT(motor, cfg[1], cfg[2], actual_pos, 0, 0)
+        time.sleep(0.001)
+
+    def _gripper_mit(self, gripper_id: int, percent: float, kp: float = None, kd: float = None):
+        with self.motor_lock:
+            if gripper_id not in self.motors:
+                return
+            motor = self.motors[gripper_id]
+        cfg = JOINT_CONFIG.get(gripper_id, (None, 0.5, 0.05))
+        use_kp = kp if kp is not None else cfg[1]
+        use_kd = kd if kd is not None else cfg[2]
+        actual_pos = self._gripper_percent_to_pos(percent, gripper_id)
+        self.dm_mc.controlMIT(motor, use_kp, use_kd, actual_pos, 0, 0)
+        time.sleep(0.001)
+    
+    def put_cmd(self, cmd: dict, priority: bool = False):
+        """放入命令队列"""
+        try:
+            self.cmd_queue.put_nowait(cmd)
+            return True
+        except Full:
+            if priority:
+                try:
+                    self.cmd_queue.get_nowait()
+                except Empty:
+                    pass
+                try:
+                    self.cmd_queue.put_nowait(cmd)
+                    return True
+                except Full:
+                    return False
+            return False
+
+
 # ============ Zenoh Pub/Sub服务器 ============
 class MotorServer:
     def __init__(self, imu_path: str = '/dev/imu', can_interface: str = 'can1', imu_baudrate: int = 921600):
@@ -193,26 +457,9 @@ class MotorServer:
         self.closed = False
         self.can_interface = can_interface
         
-        # 电机控制器和电机对象
-        self.dm_mc = None
+        # 共享电机对象和锁
         self.motors: Dict[int, DM_Motor] = {}
-        self.registered = False
         self.motor_lock = Lock()
-        
-        # 最新MIT命令缓存(覆盖策略，避免队列堆积)
-        self._latest_mit_cmd: Optional[Dict] = None
-        self._mit_cmd_lock = Lock()
-        
-        # 最新夹爪命令缓存(覆盖策略)
-        self._latest_gripper_cmd: Dict[int, Dict] = {}  # {gripper_id: cmd_dict}
-        self._gripper_cmd_lock = Lock()
-        
-        # 优先命令队列(register/disable等)
-        self.cmd_queue = Queue(maxsize=100)
-        
-        # 复用线程池
-        import concurrent.futures
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
         
         # 状态缓存
         self.motor_state = {}
@@ -235,6 +482,17 @@ class MotorServer:
         except Exception as e:
             print(f"✗ CAN FD初始化失败: {e}")
             raise
+        
+        # 创建三个部位工作线程
+        self.workers: Dict[str, BodyPartWorker] = {}
+        for name, joint_ids in CAN_JOINT_MAP.items():
+            if name in ('right_hand', 'left_hand', 'waist_neck'):
+                worker = BodyPartWorker(name, joint_ids, self.dm_mc, self.motors, self.motor_lock)
+                self.workers[name] = worker
+                worker.start()
+        
+        # 线程池用于查询
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
         # 初始化Zenoh
         config = zenoh.Config()
@@ -244,9 +502,6 @@ class MotorServer:
         self.sub_cmd = self.session.declare_subscriber("taks/cmd/**", self._handle_cmd)
         
         # 启动工作线程
-        self.cmd_thread = Thread(target=self._process_commands, daemon=True)
-        self.cmd_thread.start()
-        
         self.query_thread = Thread(target=self._query_motors, daemon=True)
         self.query_thread.start()
         
@@ -262,275 +517,15 @@ class MotorServer:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         IMUWorker(path, state_q, baud, evt).run()
 
-    def _register_motors(self, joint_ids: List[int]):
-        """注册并使能指定的电机 (多线程并行使能)"""
-        import concurrent.futures
-        
-        start_time = time.perf_counter()
-        
-        # 第一步: 串行添加电机对象 (必须串行，因为 addMotor 修改共享状态)
-        motors_to_enable = []
-        with self.motor_lock:
-            for jid in joint_ids:
-                cfg = JOINT_CONFIG.get(jid)
-                if not cfg:
-                    continue
-                if jid in self.motors:
-                    motors_to_enable.append((jid, self.motors[jid], True))  # (jid, motor, is_re_enable)
-                else:
-                    motor = DM_Motor(cfg[0], jid, jid + 0x80)
-                    self.dm_mc.addMotor(motor)
-                    self.motors[jid] = motor
-                    motors_to_enable.append((jid, motor, False))
-        
-        # 第二步: 并行使能电机
-        success_count = 0
-        fail_count = 0
-        
-        def enable_motor(args):
-            jid, motor, is_re_enable = args
-            try:
-                self.dm_mc.switchControlMode(motor, Control_Type.MIT)
-                self.dm_mc.enable(motor)
-                return (jid, True, is_re_enable)
-            except Exception as e:
-                return (jid, False, str(e))
-        
-        # 使用线程池并行使能
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(motors_to_enable), 8)) as executor:
-            results = list(executor.map(enable_motor, motors_to_enable))
-        
-        for result in results:
-            jid, ok, info = result
-            if ok:
-                success_count += 1
-                status = "重新使能" if info else "使能成功"
-                print(f"✓ 电机 J{jid} {status}")
-            else:
-                fail_count += 1
-                print(f"✗ 电机使能失败 J{jid}: {info}")
-        
-        self.registered = success_count > 0
-        elapsed = (time.perf_counter() - start_time) * 1000
-        print(f"✓ 共注册 {success_count} 个电机 (耗时 {elapsed:.1f}ms)")
-        if fail_count > 0:
-            print(f"✗ {fail_count} 个电机使能失败")
-
-    def _disable_motors(self, joint_ids: List[int] = None):
-        """失能指定电机 (多线程并行失能)"""
-        import concurrent.futures
-        
-        start_time = time.perf_counter()
-        
-        with self.motor_lock:
-            if joint_ids is None:
-                joint_ids = list(self.motors.keys())
-            motors_to_disable = [(jid, self.motors[jid]) for jid in joint_ids if jid in self.motors]
-        
-        def disable_motor(args):
-            jid, motor = args
-            try:
-                self.dm_mc.controlMIT(motor, 0, 0, 0, 0, 0)
-                time.sleep(0.01)
-                self.dm_mc.disable(motor)
-                return (jid, True)
-            except:
-                return (jid, False)
-        
-        # 使用线程池并行失能
-        if motors_to_disable:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(motors_to_disable), 8)) as executor:
-                list(executor.map(disable_motor, motors_to_disable))
-        
-        with self.motor_lock:
-            # 从motors字典中移除已失能的电机
-            for jid, _ in motors_to_disable:
-                if jid in self.motors:
-                    del self.motors[jid]
-            # 如果所有电机都被失能，重置registered标志
-            if not self.motors:
-                self.registered = False
-        
-        disabled_ids = [jid for jid, _ in motors_to_disable]
-        elapsed = (time.perf_counter() - start_time) * 1000
-        print(f"✓ 电机已失能: {disabled_ids} (耗时 {elapsed:.1f}ms)")
-
-    def _get_gripper_direction(self, gripper_id: int) -> int:
-        if gripper_id == LEFT_GRIPPER_ID:
-            return LEFT_GRIPPER_DIRECTION
-        return RIGHT_GRIPPER_DIRECTION
-
-    def _gripper_percent_to_pos(self, percent: float, gripper_id: int) -> float:
-        percent = max(0, min(100, percent))
-        pos = GRIPPER_OPEN + (GRIPPER_CLOSE - GRIPPER_OPEN) * (percent / 100.0)
-        return pos * self._get_gripper_direction(gripper_id)
-
-    def _process_commands(self):
-        """处理命令队列(优先命令) + MIT/夹爪命令(最新覆盖)"""
-        while self.running:
-            try:
-                # 1. 处理优先命令(register/disable等)
-                try:
-                    msg = self.cmd_queue.get_nowait()
-                    cmd = msg.get('cmd', '')
-                    if cmd == 'register':
-                        self._register_motors(msg.get('joint_ids', ALL_JOINT_IDS))
-                    elif cmd == 'disable_all':
-                        joint_ids = msg.get('joint_ids')
-                        self._disable_motors(joint_ids if joint_ids else None)
-                except Empty:
-                    pass
-                
-                # 2. 处理最新MIT命令
-                with self._mit_cmd_lock:
-                    mit_cmd = self._latest_mit_cmd
-                    self._latest_mit_cmd = None
-                if mit_cmd:
-                    self._mit_fast(mit_cmd)
-                
-                # 3. 处理最新夹爪命令
-                with self._gripper_cmd_lock:
-                    gripper_cmds = dict(self._latest_gripper_cmd)
-                    self._latest_gripper_cmd.clear()
-                for gripper_id, cmd_data in gripper_cmds.items():
-                    cmd_type = cmd_data.get('type')
-                    if cmd_type == 'oc':
-                        self._gripper_oc(gripper_id, cmd_data.get('close', False))
-                    elif cmd_type == 'pos':
-                        self._gripper_pos(gripper_id, cmd_data.get('percent', 0))
-                    elif cmd_type == 'mit':
-                        self._gripper_mit(gripper_id, cmd_data.get('percent', 0), cmd_data.get('kp'), cmd_data.get('kd'))
-                
-                # 无命令时短暂休眠
-                if not mit_cmd and not gripper_cmds:
-                    time.sleep(0.001)
-                    
-            except Exception as e:
-                print(f"命令处理错误: {e}")
-
-    def _mit_fast(self, joints: dict):
-        """MIT控制 - 快速版(复用线程池)"""
-        control_tasks = []
-        ankle_data = {}  # 收集踝关节数据
-        with self.motor_lock:
-            for jid, p in joints.items():
-                jid = int(jid)
-                if jid not in self.motors:
-                    continue
-                motor = self.motors[jid]
-                cfg = JOINT_CONFIG.get(jid, (None, 5.0, 1.0))
-                q = p.get('q', 0)
-                kp = p.get('kp') if p.get('kp') is not None else cfg[1]
-                kd = p.get('kd') if p.get('kd') is not None else cfg[2]
-                dq = p.get('dq', 0)
-                tau = p.get('tau', 0)
-                
-                # 踝关节特殊处理
-                if jid in ANKLE_MOTOR_IDS:
-                    pair = (27, 28) if jid in (27, 28) else (33, 34)
-                    if pair not in ankle_data:
-                        ankle_data[pair] = {}
-                    if jid == pair[0]:  # pitch
-                        ankle_data[pair]['pitch'] = (motor, q, dq, tau, kp, kd)
-                    else:  # roll
-                        ankle_data[pair]['roll'] = (motor, q, dq, tau, kp, kd)
-                else:
-                    control_tasks.append((motor, kp, kd, q, dq, tau))
-        
-        def send_mit(args):
-            motor, kp, kd, q, dq, tau = args
-            self.dm_mc.controlMIT(motor, kp, kd, q, dq, tau)
-        
-        # 处理踝关节
-        for pair, data in ankle_data.items():
-            if 'pitch' in data and 'roll' in data:
-                m_pitch, pitch, pitch_vel, tau_pitch, kp, kd = data['pitch']
-                m_roll, roll, roll_vel, tau_roll, _, _ = data['roll']
-                self.dm_mc.controlMIT_ankle(m_pitch, m_roll, kp, kd, pitch, roll, pitch_vel, roll_vel, tau_pitch, tau_roll)
-        
-        if control_tasks:
-            list(self._executor.map(send_mit, control_tasks))
-
-    def _mit(self, joints: dict):
-        """MIT控制 - 兼容旧接口"""
-        self._mit_fast(joints)
-
-    def _pos(self, joints: dict):
-        """位置控制 (复用线程池)"""
-        control_tasks = []
-        ankle_data = {}  # 收集踝关节数据
-        with self.motor_lock:
-            for jid, val in joints.items():
-                jid = int(jid)
-                if jid not in self.motors:
-                    continue
-                motor = self.motors[jid]
-                cfg = JOINT_CONFIG.get(jid, (None, 5.0, 1.0))
-                
-                # 踝关节特殊处理
-                if jid in ANKLE_MOTOR_IDS:
-                    pair = (27, 28) if jid in (27, 28) else (33, 34)
-                    if pair not in ankle_data:
-                        ankle_data[pair] = {'kp': cfg[1], 'kd': cfg[2]}
-                    if jid == pair[0]:  # pitch
-                        ankle_data[pair]['pitch'] = (motor, val)
-                    else:  # roll
-                        ankle_data[pair]['roll'] = (motor, val)
-                else:
-                    control_tasks.append((motor, cfg[1], cfg[2], val))
-        
-        def send_pos(args):
-            motor, kp, kd, pos = args
-            self.dm_mc.controlMIT(motor, kp, kd, pos, 0, 0)
-        
-        # 处理踝关节
-        for pair, data in ankle_data.items():
-            if 'pitch' in data and 'roll' in data:
-                m_pitch, pitch = data['pitch']
-                m_roll, roll = data['roll']
-                self.dm_mc.controlMIT_ankle(m_pitch, m_roll, data['kp'], data['kd'], pitch, roll)
-        
-        if control_tasks:
-            list(self._executor.map(send_pos, control_tasks))
-
-    def _gripper_oc(self, gripper_id: int, close: bool):
-        with self.motor_lock:
-            if gripper_id not in self.motors:
-                return
-            motor = self.motors[gripper_id]
-            cfg = JOINT_CONFIG.get(gripper_id, (None, 0.5, 0.05))
-            pos = GRIPPER_CLOSE if close else GRIPPER_OPEN
-            actual_pos = pos * self._get_gripper_direction(gripper_id)
-            self.dm_mc.controlMIT(motor, cfg[1], cfg[2], actual_pos, 0, 0)
-
-    def _gripper_pos(self, gripper_id: int, percent: float):
-        with self.motor_lock:
-            if gripper_id not in self.motors:
-                return
-            motor = self.motors[gripper_id]
-            cfg = JOINT_CONFIG.get(gripper_id, (None, 0.5, 0.05))
-            actual_pos = self._gripper_percent_to_pos(percent, gripper_id)
-            self.dm_mc.controlMIT(motor, cfg[1], cfg[2], actual_pos, 0, 0)
-
-    def _gripper_mit(self, gripper_id: int, percent: float, kp: float = None, kd: float = None):
-        with self.motor_lock:
-            if gripper_id not in self.motors:
-                return
-            motor = self.motors[gripper_id]
-            cfg = JOINT_CONFIG.get(gripper_id, (None, 0.5, 0.05))
-            use_kp = kp if kp is not None else cfg[1]
-            use_kd = kd if kd is not None else cfg[2]
-            actual_pos = self._gripper_percent_to_pos(percent, gripper_id)
-            self.dm_mc.controlMIT(motor, use_kp, use_kd, actual_pos, 0, 0)
-
     def _query_motors(self):
-        """定期查询电机状态 (复用线程池)"""
+        """定期查询电机状态"""
         query_interval = 0.001
         
         def query_motor(args):
             jid, motor = args
             try:
                 self.dm_mc.refresh_motor_status(motor)
+                time.sleep(0.001)
                 return (str(jid), {
                     'pos': float(motor.getPosition() or 0),
                     'vel': float(motor.getVelocity() or 0),
@@ -541,7 +536,9 @@ class MotorServer:
         
         while self.running:
             try:
-                if not self.registered:
+                # 检查是否有已注册的电机
+                any_registered = any(w.registered for w in self.workers.values())
+                if not any_registered:
                     time.sleep(0.01)
                     continue
                 
@@ -560,12 +557,11 @@ class MotorServer:
                             pair = (27, 28) if jid_int in (27, 28) else (33, 34)
                             if pair not in ankle_pairs_to_convert:
                                 ankle_pairs_to_convert[pair] = {}
-                            if jid_int == pair[0]:  # pitch
+                            if jid_int == pair[0]:
                                 ankle_pairs_to_convert[pair]['pitch_id'] = jid
-                            else:  # roll
+                            else:
                                 ankle_pairs_to_convert[pair]['roll_id'] = jid
                     
-                    # 转换踝关节数据
                     for pair, ids in ankle_pairs_to_convert.items():
                         if 'pitch_id' in ids and 'roll_id' in ids:
                             pitch_id, roll_id = ids['pitch_id'], ids['roll_id']
@@ -640,81 +636,73 @@ class MotorServer:
             device = parts[2]
             cmd = parts[3]
             
-            # 确定目标关节
+            # 确定目标工作线程
             if device == 'Taks-T1':
-                target_joints = ALL_JOINT_IDS
+                targets = list(self.workers.keys())
             elif device == 'Taks-T1-semibody':
-                target_joints = CAN_JOINT_MAP['right_hand'] + CAN_JOINT_MAP['left_hand'] + CAN_JOINT_MAP['waist_neck']
+                targets = ['right_hand', 'left_hand', 'waist_neck']
             elif device == 'Taks-T1-rightgripper':
-                target_joints = [RIGHT_GRIPPER_ID]
+                targets = ['right_hand']
             elif device == 'Taks-T1-leftgripper':
-                target_joints = [LEFT_GRIPPER_ID]
+                targets = ['left_hand']
             elif device == 'Taks-T1-imu':
                 if cmd == 'register':
                     print(f"✓ 客户端注册IMU设备")
                 return
             else:
-                target_joints = []
+                targets = []
             
             if cmd == 'register':
-                self._safe_queue_put({'cmd': 'register', 'joint_ids': target_joints}, priority=True)
+                for name in targets:
+                    if name in self.workers:
+                        self.workers[name].put_cmd({'cmd': 'register'}, priority=True)
                 print(f"✓ 客户端注册设备: {device}")
             elif cmd == 'disable_all':
-                self._safe_queue_put({'cmd': 'disable_all', 'joint_ids': target_joints}, priority=True)
-                print(f"✓ 收到失能命令: {device} -> 关节{target_joints}")
+                for name in targets:
+                    if name in self.workers:
+                        self.workers[name].put_cmd({'cmd': 'disable_all'}, priority=True)
+                print(f"✓ 收到失能命令: {device}")
             elif cmd == 'mit':
                 joints = msg.get('joints', {})
                 joints = {int(k): v for k, v in joints.items()}
-                filtered = {k: v for k, v in joints.items() if k in target_joints or not target_joints}
-                # MIT命令使用覆盖策略
-                with self._mit_cmd_lock:
-                    if self._latest_mit_cmd is None:
-                        self._latest_mit_cmd = filtered
-                    else:
-                        self._latest_mit_cmd.update(filtered)
-            elif cmd == 'pos':
-                joints = msg.get('joints', {})
-                joints = {int(k): v for k, v in joints.items()}
-                filtered = {k: v for k, v in joints.items() if k in target_joints or not target_joints}
-                self._safe_queue_put({'cmd': cmd, 'joints': filtered})
+                # 按部位分发
+                by_worker = {}
+                for jid, val in joints.items():
+                    worker_name = get_can_for_joint(jid)
+                    if worker_name and worker_name in self.workers:
+                        by_worker.setdefault(worker_name, {})[jid] = val
+                for name, worker_joints in by_worker.items():
+                    self.workers[name].put_cmd({'cmd': 'mit', 'joints': worker_joints})
             elif cmd == 'gripper_oc':
                 gripper_id = msg.get('gripper_id')
                 close = msg.get('close', False)
-                with self._gripper_cmd_lock:
-                    self._latest_gripper_cmd[gripper_id] = {'type': 'oc', 'close': close}
+                worker_name = get_can_for_joint(gripper_id)
+                if worker_name and worker_name in self.workers:
+                    self.workers[worker_name].put_cmd({
+                        'cmd': 'gripper_oc', 'gripper_id': gripper_id, 'close': close
+                    })
             elif cmd == 'gripper_pos':
                 gripper_id = msg.get('gripper_id')
                 percent = msg.get('percent', 0)
-                with self._gripper_cmd_lock:
-                    self._latest_gripper_cmd[gripper_id] = {'type': 'pos', 'percent': percent}
+                worker_name = get_can_for_joint(gripper_id)
+                if worker_name and worker_name in self.workers:
+                    self.workers[worker_name].put_cmd({
+                        'cmd': 'gripper_pos', 'gripper_id': gripper_id, 'percent': percent
+                    })
             elif cmd == 'gripper_mit':
                 gripper_id = msg.get('gripper_id')
                 percent = msg.get('percent', 0)
                 kp = msg.get('kp')
                 kd = msg.get('kd')
-                with self._gripper_cmd_lock:
-                    self._latest_gripper_cmd[gripper_id] = {'type': 'mit', 'percent': percent, 'kp': kp, 'kd': kd}
+                worker_name = get_can_for_joint(gripper_id)
+                if worker_name and worker_name in self.workers:
+                    self.workers[worker_name].put_cmd({
+                        'cmd': 'gripper_mit', 'gripper_id': gripper_id, 
+                        'percent': percent, 'kp': kp, 'kd': kd
+                    })
                             
         except Exception as e:
             print(f"命令处理错误: {e}")
-
-    def _safe_queue_put(self, item, priority=False):
-        """安全放入队列"""
-        try:
-            self.cmd_queue.put_nowait(item)
-            return True
-        except Full:
-            if priority:
-                try:
-                    self.cmd_queue.get_nowait()
-                except Empty:
-                    pass
-                try:
-                    self.cmd_queue.put_nowait(item)
-                    return True
-                except Full:
-                    return False
-            return False
 
     def run(self):
         """运行服务器"""
@@ -738,12 +726,16 @@ class MotorServer:
         print("✓ 关闭服务器...")
         self.running = False
         
+        # 停止工作线程并失能电机
+        for name, worker in self.workers.items():
+            worker.put_cmd({'cmd': 'disable_all'}, priority=True)
+        time.sleep(0.3)
+        for worker in self.workers.values():
+            worker.stop()
+        
         # 关闭线程池
         if hasattr(self, '_executor'):
             self._executor.shutdown(wait=False)
-        
-        # 失能所有电机
-        self._disable_motors()
         
         # 关闭CAN控制器
         if self.dm_mc:

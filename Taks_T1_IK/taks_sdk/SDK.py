@@ -130,6 +130,7 @@ JOINT_CONFIG = {
 }
 
 ANKLE_PAIRS = {27: (27, 28), 33: (33, 34)}
+ANKLE_MOTOR_IDS = {27, 28, 33, 34}
 
 CAN_JOINT_MAP = {
     'right_hand': [1, 2, 3, 4, 5, 6, 7, 8],
