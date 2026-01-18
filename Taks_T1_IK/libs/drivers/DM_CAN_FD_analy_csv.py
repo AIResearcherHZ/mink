@@ -18,7 +18,7 @@ from enum import IntEnum
 from struct import unpack, pack
 import can
 import threading
-from drivers.ankle_kinematics import (
+from ankle_kinematics import (
     ankle_ik,
     ankle_fk,
     motor_vel_to_ankle_vel,
@@ -731,10 +731,18 @@ class MotorControlFD:
             data=bytes(data),
             is_extended_id=False
         )
-        try:
-            self.bus.send(msg)
-        except can.CanError as e:
-            print(f"CAN send error: {e}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self.bus.send(msg, timeout=0.001)
+                return
+            except can.CanError as e:
+                if "Transmit buffer full" in str(e) and attempt < max_retries - 1:
+                    sleep(0.0001)
+                    continue
+                if attempt == max_retries - 1:
+                    print(f"CAN send error: {e}")
+                    return
 
     def __read_RID_param(self, Motor, RID):
         can_id_l = Motor.SlaveID & 0xff  # id low 8 bits

@@ -14,7 +14,7 @@ from enum import IntEnum
 from struct import unpack, pack
 import can
 import threading
-from drivers.ankle_kinematics import (
+from ankle_kinematics import (
     ankle_ik,
     ankle_fk,
     motor_vel_to_ankle_vel,
@@ -735,6 +735,7 @@ class MotorControlFD:
                 # float类型
                 num = uint8s_to_float(data[4], data[5], data[6], data[7])
                 self.motors_map[masterid].temp_param_dict[RID] = num
+            print(f"[DEBUG] 参数回复: CANID={hex(CANID)}, SlaveID={slaveId}, RID={RID}, 值={num}, 原始数据={data.hex()}")
 
     def addMotor(self, Motor):
         """
@@ -762,10 +763,18 @@ class MotorControlFD:
             data=bytes(data),
             is_extended_id=False
         )
-        try:
-            self.bus.send(msg)
-        except can.CanError as e:
-            print(f"CAN send error: {e}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self.bus.send(msg, timeout=0.001)
+                return
+            except can.CanError as e:
+                if "Transmit buffer full" in str(e) and attempt < max_retries - 1:
+                    sleep(0.0001)
+                    continue
+                if attempt == max_retries - 1:
+                    print(f"CAN send error: {e}")
+                    return
 
     def __read_RID_param(self, Motor, RID):
         can_id_l = Motor.SlaveID & 0xff  # id low 8 bits
@@ -859,13 +868,13 @@ class MotorControlFD:
 
         self.__write_motor_param(Motor, RID, data)
         for _ in range(max_retries):
+            sleep(retry_interval)
             self.recv_set_param_data()
             if Motor.SlaveID in self.motors_map and RID in self.motors_map[Motor.SlaveID].temp_param_dict:
                 if abs(self.motors_map[Motor.SlaveID].temp_param_dict[RID] - data) < 0.1:
                     return True
                 else:
                     return False
-            sleep(retry_interval)
         return False
 
     def read_motor_param(self, Motor, RID):

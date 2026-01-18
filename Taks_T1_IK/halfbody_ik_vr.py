@@ -73,7 +73,7 @@ SAFE_KP_KD = {
 # 启停配置
 RAMP_UP_TIME = 5.0
 RAMP_DOWN_TIME = 5.0
-FEEDFORWARD_SCALE = 0.5
+FEEDFORWARD_SCALE = 0.75
 
 # 非线性缓动参数 (可调)
 
@@ -92,8 +92,8 @@ FEEDFORWARD_SCALE = 0.5
 # Ramp Down (ease_in): **开始更慢，后面更快**
 #   - 增大 exponent → kp/kd 前半段降得更慢，越接近结束越快归零/安全值，避免“突然塌陷”
 
-RAMP_EXPONENT_EASE_OUT = 1.05  # 用于kp/kd的ramp up和position的ramp down
-RAMP_EXPONENT_EASE_IN = 1.05   # 用于kp/kd的ramp down
+RAMP_EXPONENT_EASE_OUT = 1.1  # 用于kp/kd的ramp up和position的ramp down
+RAMP_EXPONENT_EASE_IN = 0.95   # 用于kp/kd的ramp down
 
 # 安全倒向配置: 停止时主动倒向此方向
 SAFE_FALL_POSITIONS = {

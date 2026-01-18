@@ -17,8 +17,8 @@
 # 关闭接口（如果已启动）
 sudo ip link set can0 down
 
-# 启动 CAN FD 模式：仲裁段 1Mbps，数据段 5Mbps
-sudo ip link set can0 up type can bitrate 1000000 dbitrate 5000000 fd on
+# 启动 CAN FD 模式：仲裁段 1Mbps，数据段 5Mbps，采样点 0.75
+sudo ip link set can0 up type can bitrate 1000000 sample-point 0.75 dbitrate 5000000 fd on
 
 # 验证
 ip -details link show can0
