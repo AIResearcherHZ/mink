@@ -92,7 +92,8 @@ FEEDFORWARD_SCALE = 0.5
 # Ramp Down (ease_in): **开始更慢，后面更快**
 #   - 增大 exponent → kp/kd 前半段降得更慢，越接近结束越快归零/安全值，避免“突然塌陷”
 
-RAMP_EXPONENT = 1.05
+RAMP_EXPONENT_EASE_OUT = 1.05  # 用于kp/kd的ramp up和position的ramp down
+RAMP_EXPONENT_EASE_IN = 1.05   # 用于kp/kd的ramp down
 
 # 安全倒向配置: 停止时主动倒向此方向
 SAFE_FALL_POSITIONS = {
@@ -127,11 +128,11 @@ COLLISION_PAIRS = [
 
 # ==================== 工具函数 ====================
 
-def ease_out(t: float, exp: float = RAMP_EXPONENT) -> float:
+def ease_out(t: float, exp: float = RAMP_EXPONENT_EASE_OUT) -> float:
     """缓出函数: 开始快，结束慢"""
     return 1.0 - pow(1.0 - t, exp)
 
-def ease_in(t: float, exp: float = RAMP_EXPONENT) -> float:
+def ease_in(t: float, exp: float = RAMP_EXPONENT_EASE_IN) -> float:
     """缓入函数: 开始慢，结束快"""
     return pow(t, exp)
 
@@ -498,10 +499,10 @@ class HalfBodyIKController:
                 kp_safe, kd_safe = SAFE_KP_KD.get(sdk_id, (5.0, 1.0))
                 kp_val = kp_safe + (kp_target - kp_safe) * kp_kd_scale
                 kd_val = kd_safe + (kd_target - kd_safe) * kp_kd_scale
-                # 使用安全倒向位置(如果配置了)
+                # 使用安全倒向位置(如果配置了), position用ease_out
                 start_q = start_positions.get(sdk_id, 0.0)
                 target_q = SAFE_FALL_POSITIONS.get(sdk_id, start_q)
-                q_val = start_q + (target_q - start_q) * t
+                q_val = start_q + (target_q - start_q) * ease_out(t)
                 mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': 0.0, 'kp': kp_val, 'kd': kd_val}
             self.robot.controlMIT(mit_cmd)
             time.sleep(0.001)

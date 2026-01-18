@@ -9,9 +9,8 @@ import sys
 import os
 import time
 import threading
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from drivers.DM_CAN_FD import Motor, MotorControlFD, DM_Motor_Type
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from libs.drivers.DM_CAN_FD import Motor, MotorControlFD, DM_Motor_Type
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, Grid
@@ -21,11 +20,15 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.reactive import reactive
 from rich.text import Text
+from rich.console import Console, ConsoleOptions, RenderResult
+from rich.segment import Segment
+from rich.style import Style
+import math
 
 # 配置参数
-CAN_INTERFACE = "can1"  # SocketCAN 接口名
-UI_REFRESH_RATE = 10  # UI刷新频率 Hz (降低以保证流畅)
-CAN_POLL_INTERVAL = 0.05  # CAN轮询间隔 50ms (20Hz)
+CAN_INTERFACE = "can0"  # SocketCAN 接口名
+UI_REFRESH_RATE = 30  # UI刷新频率 Hz (降低以保证流畅)
+CAN_POLL_INTERVAL = 0.03  # CAN轮询间隔 50ms (20Hz)
 
 # 预设的电机配置 (半身 22个电机: 0x01 ~ 0x16)
 PRESET_MOTOR_IDS = list(range(0x01, 0x17))  # 1~22
@@ -103,6 +106,93 @@ def get_motor_group_id(motor_id: int) -> str:
     return "unknown"
 
 
+def create_angle_indicator(angle_deg: float) -> str:
+    """创建精细绘制的圆形角度指示器
+    
+    使用Braille盲文字符绘制圆形表盘，显示当前角度的指针方向
+    每个Braille字符可以表示2x4的点阵，实现高精度绘制
+    宽度5字符，单行显示
+    """
+    
+    # 标准化角度
+    angle = angle_deg % 360
+    if angle < 0:
+        angle += 360
+    
+    # 转换为弧度 (0度在右侧，逆时针为正)
+    angle_rad = math.radians(90 - angle)
+    
+    # 使用Braille字符绘制: 每个字符是2x4点阵
+    # 总画布: 5个字符 = 10x4 点
+    width_chars = 5
+    width_dots = width_chars * 2
+    height_dots = 4
+    
+    # 中心点和半径
+    cx, cy = 5.0, 2.0
+    radius = 3.5
+    
+    # 计算指针端点
+    px = cx + radius * math.cos(angle_rad)
+    py = cy - radius * math.sin(angle_rad)
+    
+    # 虚拟点阵画布
+    canvas = [[False] * width_dots for _ in range(height_dots)]
+    
+    # 绘制圆环
+    for x in range(width_dots):
+        for y in range(height_dots):
+            dist = math.sqrt((x - cx)**2 + (y - cy)**2)
+            if abs(dist - radius) < 0.8:
+                canvas[y][x] = True
+    
+    # 绘制指针 (从中心到端点)
+    steps = 30
+    for i in range(steps):
+        t = i / steps
+        lx = int(cx + t * (px - cx) + 0.5)
+        ly = int(cy + t * (py - cy) + 0.5)
+        if 0 <= lx < width_dots and 0 <= ly < height_dots:
+            canvas[ly][lx] = True
+    
+    # 转换为Braille字符
+    # Braille Unicode: U+2800 基础，每个点对应一个bit
+    # 点位映射: 1 4    (左列)
+    #          2 5    (左列)
+    #          3 6    (左列)
+    #          7 8    (右列第4行)
+    result = ""
+    for char_x in range(width_chars):
+        dot_x = char_x * 2
+        
+        # 获取这个字符位置的8个点
+        dots = [
+            canvas[0][dot_x] if dot_x < width_dots else False,      # 点1
+            canvas[1][dot_x] if dot_x < width_dots else False,      # 点2
+            canvas[2][dot_x] if dot_x < width_dots else False,      # 点3
+            canvas[0][dot_x+1] if dot_x+1 < width_dots else False,  # 点4
+            canvas[1][dot_x+1] if dot_x+1 < width_dots else False,  # 点5
+            canvas[2][dot_x+1] if dot_x+1 < width_dots else False,  # 点6
+            canvas[3][dot_x] if dot_x < width_dots else False,      # 点7
+            canvas[3][dot_x+1] if dot_x+1 < width_dots else False,  # 点8
+        ]
+        
+        # 计算Braille字符码点
+        braille_value = 0
+        if dots[0]: braille_value |= 0x01
+        if dots[1]: braille_value |= 0x02
+        if dots[2]: braille_value |= 0x04
+        if dots[3]: braille_value |= 0x08
+        if dots[4]: braille_value |= 0x10
+        if dots[5]: braille_value |= 0x20
+        if dots[6]: braille_value |= 0x40
+        if dots[7]: braille_value |= 0x80
+        
+        result += chr(0x2800 + braille_value)
+    
+    return result
+
+
 class MotorDataCache:
     """线程安全的电机数据缓存 - 纯数据层，与UI完全解耦"""
     
@@ -133,7 +223,7 @@ class MotorDataCache:
 class CANCommThread(threading.Thread):
     """独立的CAN通讯线程 - 完全与UI解耦"""
     
-    def __init__(self, motor_ids: list, data_cache: MotorDataCache, interface: str = "can1"):
+    def __init__(self, motor_ids: list, data_cache: MotorDataCache, interface: str = "can0"):
         super().__init__(daemon=True)
         self.motor_ids = motor_ids
         self.data_cache = data_cache
@@ -276,13 +366,15 @@ class ConfirmZeroScreen(ModalScreen[bool]):
     CSS = """
     ConfirmZeroScreen {
         align: center middle;
+        background: $boost;
+        tint: black 70%;
     }
     
     #dialog {
         width: 50;
         height: 12;
-        border: thick $primary;
-        background: $surface;
+        border: thick $warning;
+        background: $panel;
         padding: 1 2;
     }
     
@@ -296,6 +388,7 @@ class ConfirmZeroScreen(ModalScreen[bool]):
     #dialog-content {
         text-align: center;
         margin-bottom: 1;
+        color: $text;
     }
     
     #dialog-buttons {
@@ -377,7 +470,7 @@ class MotorTable(Static):
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
         self._table_cache = table  # 缓存引用
-        table.add_columns("名称", "ID", "10进制", "rad", "°", "vel", "τ")
+        table.add_columns("名称", "ID", "rad", "°", "⊙", "vel", "τ")
         
         # 添加初始行
         for motor_id in self.motor_ids:
@@ -385,50 +478,47 @@ class MotorTable(Static):
             table.add_row(
                 motor_name,
                 f"0x{motor_id:02X}",
-                f"{motor_id}",
-                "+0.000",
                 "+0.0",
-                "+0.00",
-                "+0.00",
+                "+0.0",
+                create_angle_indicator(0.0),
+                "+0.0",
+                "+0.0",
                 key=str(motor_id)
             )
     
     def get_degree_color(self, motor_id: int, pos_deg: float) -> str:
-        """根据角度值返回渐变颜色
+        """根据角度偏移量返回渐变颜色
         0~5°: 灰色 (接近零位)
-        5~15°: 浅色
-        15~30°: 中等色
-        30~60°: 较深色
-        60~90°: 深色
-        |deg|>90°: 反色警告
-        正值用绿色系，负值用红色系
+        5~15°: 浅绿色
+        15~30°: 中绿色
+        30~45°: 深绿色
+        45~90°: 浅红色
+        90~135°: 中红色
+        135~180°: 深红色
+        >180°: 反色警告
         """
-        if round(pos_deg, 1) == 0.0:
-            return "dim white"
-        # 计算相对于参考值的偏差
-        if motor_id in (0x0C, 0x04):
-            ref_deg = -90.0
-        else:
-            ref_deg = 0.0
+        abs_deg = abs(pos_deg)
         
-        deg = pos_deg - ref_deg
-        abs_deg = abs(deg)
-        is_positive = deg >= 0
-        
-        # 渐变颜色映射
+        # 接近零位
         if abs_deg < 5:
             return "dim white"
+        # 绿色渐变区 (5~45度)
         elif abs_deg < 15:
-            return "green4" if is_positive else "indian_red"
+            return "green4"
         elif abs_deg < 30:
-            return "green3" if is_positive else "red3"
-        elif abs_deg < 60:
-            return "green1" if is_positive else "red1"
-        elif abs_deg <= 90:
-            return "bold bright_green" if is_positive else "bold bright_red"
+            return "green3"
+        elif abs_deg < 45:
+            return "green1"
+        # 红色渐变区 (45~180度)
+        elif abs_deg < 90:
+            return "indian_red"
+        elif abs_deg < 135:
+            return "red3"
+        elif abs_deg <= 180:
+            return "red1"
         else:
-            # 绝对值超过90度: 反色警告 (包括>90和<-90)
-            return "bold reverse bright_green" if is_positive else "bold reverse bright_red"
+            # 超过180度: 反色警告
+            return "bold reverse bright_red"
     
     def render_motor(self, motor_id: int, pos_rad: float, vel: float, tau: float):
         """渲染电机数据 (固定帧率调用，只在数据变化时更新UI)"""
@@ -437,13 +527,14 @@ class MotorTable(Static):
         self.motor_data[motor_id] = (pos_rad, pos_deg_display, vel, tau)
         
         # 格式化字符串
-        rad_str = f"{pos_rad:+.3f}"
+        rad_str = f"{pos_rad:+.1f}"
         deg_str = f"{pos_deg_display:+.1f}"
-        vel_str = f"{vel:+.2f}"
-        tau_str = f"{tau:+.2f}"
+        vel_str = f"{vel:+.1f}"
+        tau_str = f"{tau:+.1f}"
+        angle_indicator = create_angle_indicator(pos_deg_display)
         
         # 检查是否需要更新UI (数据未变化则跳过)
-        current_render = (rad_str, deg_str, vel_str, tau_str)
+        current_render = (rad_str, deg_str, angle_indicator, vel_str, tau_str)
         if motor_id in self._last_rendered and self._last_rendered[motor_id] == current_render:
             return  # 数据未变化，跳过UI更新
         self._last_rendered[motor_id] = current_render
@@ -461,8 +552,9 @@ class MotorTable(Static):
             table = self._table_cache
             if table is None:
                 return
-            table.update_cell_at((row_idx, 3), Text(rad_str, style=color))
-            table.update_cell_at((row_idx, 4), Text(deg_str, style=color))
+            table.update_cell_at((row_idx, 2), Text(rad_str, style=color))
+            table.update_cell_at((row_idx, 3), Text(deg_str, style=color))
+            table.update_cell_at((row_idx, 4), Text(angle_indicator, style=color))
             table.update_cell_at((row_idx, 5), vel_str)
             table.update_cell_at((row_idx, 6), tau_str)
         except Exception:

@@ -18,7 +18,7 @@ from enum import IntEnum
 from struct import unpack, pack
 import can
 import threading
-from libs.drivers.ankle_kinematics import (
+from drivers.ankle_kinematics import (
     ankle_ik,
     ankle_fk,
     motor_vel_to_ankle_vel,
