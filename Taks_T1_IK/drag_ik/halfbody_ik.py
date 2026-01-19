@@ -232,8 +232,8 @@ if __name__ == "__main__":
             hands_center_dist = np.linalg.norm(hands_center_diff)
             
             # 安全范围配置：内圈完全不动，外圈完全补偿，中间平滑过渡
-            waist_safe_zone_inner = 0.25  # 内圈：完全不动
-            waist_safe_zone_outer = 0.35  # 外圈：完全补偿
+            waist_safe_zone_inner = 0.15  # 内圈：完全不动
+            waist_safe_zone_outer = 0.30  # 外圈：完全补偿
             
             # 计算渐变系数（0=完全不动，1=完全补偿）
             if hands_center_dist <= waist_safe_zone_inner:
