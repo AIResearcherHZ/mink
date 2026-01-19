@@ -35,26 +35,26 @@ END_EFFECTORS = {
 }
 
 # 碰撞对
-COLLISION_PAIRS = [
-    (["torso_collision"], ["left_hand_collision", "right_hand_collision"]),
-    (["torso_collision"], ["left_elbow_collision", "right_elbow_collision"]),
-    (["left_hand_collision"], ["right_hand_collision"]),
-    (["left_elbow_collision"], ["right_elbow_collision"]),
-    (["head_collision"], ["left_hand_collision", "right_hand_collision"]),
-    (["head_collision"], ["left_elbow_collision", "right_elbow_collision"]),
-    (["left_hand_collision"], ["right_elbow_collision"]),
-    (["right_hand_collision"], ["left_elbow_collision"]),
-    (["left_hand_collision"], ["left_hip_collision", "left_foot_collision"]),
-    (["left_hand_collision"], ["right_hip_collision", "right_foot_collision"]),
-    (["right_hand_collision"], ["left_hip_collision", "left_foot_collision"]),
-    (["left_foot_collision"], ["torso_collision"]),
-    (["right_foot_collision"], ["torso_collision"]),
-    (["left_foot_collision", "right_foot_collision"], ["floor"]),
-    (["pelvis_collision"], ["left_hand_collision", "right_hand_collision"]),
-    (["pelvis_collision"], ["left_elbow_collision", "right_elbow_collision"]),
-    (["left_shoulder_roll_collision"], ["right_hand_collision", "right_elbow_collision"]),
-    (["right_shoulder_roll_collision"], ["left_hand_collision", "left_elbow_collision"]),
-]
+# COLLISION_PAIRS = [
+#     (["torso_collision"], ["left_hand_collision", "right_hand_collision"]),
+#     (["torso_collision"], ["left_elbow_collision", "right_elbow_collision"]),
+#     (["left_hand_collision"], ["right_hand_collision"]),
+#     (["left_elbow_collision"], ["right_elbow_collision"]),
+#     (["head_collision"], ["left_hand_collision", "right_hand_collision"]),
+#     (["head_collision"], ["left_elbow_collision", "right_elbow_collision"]),
+#     (["left_hand_collision"], ["right_elbow_collision"]),
+#     (["right_hand_collision"], ["left_elbow_collision"]),
+#     (["left_hand_collision"], ["left_hip_collision", "left_foot_collision"]),
+#     (["left_hand_collision"], ["right_hip_collision", "right_foot_collision"]),
+#     (["right_hand_collision"], ["left_hip_collision", "left_foot_collision"]),
+#     (["left_foot_collision"], ["torso_collision"]),
+#     (["right_foot_collision"], ["torso_collision"]),
+#     (["left_foot_collision", "right_foot_collision"], ["floor"]),
+#     (["pelvis_collision"], ["left_hand_collision", "right_hand_collision"]),
+#     (["pelvis_collision"], ["left_elbow_collision", "right_elbow_collision"]),
+#     (["left_shoulder_roll_collision"], ["right_hand_collision", "right_elbow_collision"]),
+#     (["right_shoulder_roll_collision"], ["left_hand_collision", "left_elbow_collision"]),
+# ]
 
 # 腰部配置
 WAIST_CONFIG = {
@@ -180,9 +180,9 @@ if __name__ == "__main__":
     limits = [
         mink.ConfigurationLimit(model),
         mink.VelocityLimit(model),
-        mink.CollisionAvoidanceLimit(model, COLLISION_PAIRS, gain=0.15,
-                                     minimum_distance_from_collisions=0.08,
-                                     collision_detection_distance=0.20)
+        # mink.CollisionAvoidanceLimit(model, COLLISION_PAIRS, gain=0.1,
+        #                              minimum_distance_from_collisions=0.05,
+        #                              collision_detection_distance=0.15)
     ]
     
     # 复位状态

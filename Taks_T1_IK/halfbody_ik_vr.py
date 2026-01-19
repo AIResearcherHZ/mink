@@ -271,9 +271,9 @@ class HalfBodyIKController:
         self.limits = [
             mink.ConfigurationLimit(self.model),
             mink.VelocityLimit(self.model),
-            mink.CollisionAvoidanceLimit(self.model, COLLISION_PAIRS, gain=0.15,
-                                         minimum_distance_from_collisions=0.08,
-                                         collision_detection_distance=0.20)
+            mink.CollisionAvoidanceLimit(self.model, COLLISION_PAIRS, gain=0.1,
+                                         minimum_distance_from_collisions=0.05,
+                                         collision_detection_distance=0.15)
         ]
         
         self.cfg.update_from_keyframe("home")
@@ -426,8 +426,8 @@ class HalfBodyIKController:
         hands_center_dist = float(np.linalg.norm(hands_center_diff))
         
         # 安全范围配置：内圈完全不动，外圈完全补偿，中间平滑过渡
-        waist_safe_zone_inner = 0.25  # 内圈：完全不动
-        waist_safe_zone_outer = 0.35  # 外圈：完全补偿
+        waist_safe_zone_inner = 0.15  # 内圈：完全不动
+        waist_safe_zone_outer = 0.30  # 外圈：完全补偿
         
         # 计算渐变系数（0=完全不动，1=完全补偿）
         if hands_center_dist <= waist_safe_zone_inner:
