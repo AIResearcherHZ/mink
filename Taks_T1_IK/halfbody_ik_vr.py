@@ -126,15 +126,28 @@ def compute_waist_pitch(hands_center: np.ndarray, waist_pos: np.ndarray,
     excess = dist - threshold
     return float(np.clip(excess * gain, -0.3, 0.3))
 
-def compute_neck_angles(head_pos: np.ndarray, target_pos: np.ndarray, prev_yaw: float) -> tuple:
+def compute_neck_angles(head_pos: np.ndarray, target_pos: np.ndarray, prev_yaw: float, waist_yaw: float = 0.0) -> tuple:
+    """计算neck关节角度（yaw, pitch），相对于躯干局部坐标系"""
     direction = target_pos - head_pos
     dist = float(np.linalg.norm(direction))
     if dist < 1e-6:
         return prev_yaw, 0.0
     direction /= dist
-    raw_yaw = float(np.arctan2(direction[1], direction[0]))
+    # 世界坐标系下的yaw
+    world_yaw = float(np.arctan2(direction[1], direction[0]))
+    # 转换为相对于躯干的局部yaw（减去腰部yaw）
+    raw_yaw = world_yaw - waist_yaw
+    # 归一化到[-pi, pi]
+    while raw_yaw > np.pi:
+        raw_yaw -= 2 * np.pi
+    while raw_yaw < -np.pi:
+        raw_yaw += 2 * np.pi
     horizontal_dist = float(np.sqrt(direction[0]**2 + direction[1]**2))
     pitch = float(-np.arctan2(direction[2], horizontal_dist))
+    # 限制neck角度范围
+    raw_yaw = float(np.clip(raw_yaw, -1.2, 1.2))
+    pitch = float(np.clip(pitch, -0.5, 0.8))
+    # yaw平滑过渡
     yaw_diff = raw_yaw - prev_yaw
     while yaw_diff > np.pi:
         yaw_diff -= 2 * np.pi
@@ -195,6 +208,7 @@ class HalfBodyIKController:
         
         # VR
         self.vr = VRReceiver()
+        self.vr.start()
         self.vr_calib = VRCalibration()
         
         # SDK
@@ -405,21 +419,46 @@ class HalfBodyIKController:
         hands_center = (self.data.mocap_pos[left_mid] + self.data.mocap_pos[right_mid]) / 2.0
         cfg_w = WAIST_CONFIG
         
-        # 腰部hardcode
+        # 腰部hardcode（定义安全范围，平滑过渡避免突变）
+        # 计算双手中心到躯干的水平距离
+        hands_center_diff = hands_center - self.waist_init_pos
+        hands_center_diff[2] = 0
+        hands_center_dist = float(np.linalg.norm(hands_center_diff))
+        
+        # 安全范围配置：内圈完全不动，外圈完全补偿，中间平滑过渡
+        waist_safe_zone_inner = 0.25  # 内圈：完全不动
+        waist_safe_zone_outer = 0.35  # 外圈：完全补偿
+        
+        # 计算渐变系数（0=完全不动，1=完全补偿）
+        if hands_center_dist <= waist_safe_zone_inner:
+            blend_factor = 0.0
+        elif hands_center_dist >= waist_safe_zone_outer:
+            blend_factor = 1.0
+        else:
+            # 平滑过渡区间
+            blend_factor = (hands_center_dist - waist_safe_zone_inner) / (waist_safe_zone_outer - waist_safe_zone_inner)
+            blend_factor = float(np.clip(blend_factor, 0.0, 1.0))
+        
+        # 计算目标腰部角度
         target_waist_yaw = compute_waist_yaw(hands_center, self.waist_init_pos)
         yaw_diff = target_waist_yaw - self.prev_waist_yaw
         while yaw_diff > np.pi:
             yaw_diff -= 2 * np.pi
         while yaw_diff < -np.pi:
             yaw_diff += 2 * np.pi
-        waist_yaw = self.prev_waist_yaw + yaw_diff * cfg_w['yaw_smooth']
-        self.prev_waist_yaw = waist_yaw
-        waist_pitch = compute_waist_pitch(hands_center, self.waist_init_pos, 
-                                          cfg_w['arm_reach'], cfg_w['deadzone'], cfg_w['compensation_gain'])
+        target_yaw = self.prev_waist_yaw + yaw_diff * cfg_w['yaw_smooth']
         
-        # neck look-at
+        target_pitch = compute_waist_pitch(hands_center, self.waist_init_pos, 
+                                           cfg_w['arm_reach'], cfg_w['deadzone'], cfg_w['compensation_gain'])
+        
+        # 应用渐变系数
+        waist_yaw = target_yaw * blend_factor
+        waist_pitch = target_pitch * blend_factor
+        self.prev_waist_yaw = waist_yaw
+        
+        # neck look-at（使用局部坐标系）
         head_pos = self.data.xpos[self.model.body("neck_pitch_link").id]
-        neck_yaw, neck_pitch = compute_neck_angles(head_pos, hands_center, self.prev_neck_yaw)
+        neck_yaw, neck_pitch = compute_neck_angles(head_pos, hands_center, self.prev_neck_yaw, waist_yaw)
         self.prev_neck_yaw = neck_yaw
         
         # 复位处理
@@ -498,6 +537,7 @@ class HalfBodyIKController:
             while self.ramp_state.active:
                 self.step()
                 time.sleep(0.01)
+        self.vr.stop()
         if self.taks_client:
             self.taks_client.close()
         if self.sdk_proc:

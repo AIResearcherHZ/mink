@@ -108,68 +108,117 @@ class Recorder:
     def __init__(self, output_path: str, record_fps: int = 30, headless: bool = False,
                  host: str = "192.168.5.4", port: int = 5555, enable_real: bool = True):
         self.output_path = output_path
+        self.record_fps = record_fps
         self.record_interval = 1.0 / record_fps if record_fps > 0 else 0.0
         self.headless = headless
         self.controller = HalfBodyIKController(sim2real=enable_real, headless=headless, host=host, port=port)
         self.record_data = RecordData()
         self.running = True
+        self.shutdown_requested = False
         self.console = Console()
+        
+        # 禁用控制器的缓启动/停止(录制时不需要)
+        self.controller.enable_ramp_up = False
+        self.controller.enable_ramp_down = False
+        self.controller.ramp_state.active = False
+        self.controller.ramp_state.progress = 1.0
     
     def _signal_handler(self, signum, frame):
-        print("\n[录制] 停止...")
+        if self.shutdown_requested:
+            print("\n[强制退出]")
+            sys.exit(1)
+        print("\n[收到退出信号] 停止录制...")
+        self.shutdown_requested = True
         self.running = False
     
     def run(self):
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
         
-        print(f"[录制] 输出: {self.output_path}")
-        print("[录制] Ctrl+C 停止")
+        print(f"[录制] 开始录制，输出: {self.output_path}")
+        print(f"[录制] 模式: {'无头' if self.headless else '有头(MuJoCo)'} | 录制帧率: {self.record_fps}Hz")
+        print("[录制] Ctrl+C 停止录制并保存")
         
+        try:
+            if self.headless:
+                self._run_headless()
+            else:
+                self._run_with_viewer()
+        except Exception as e:
+            print(f"[录制] 错误: {e}")
+        finally:
+            self.record_data.save(self.output_path)
+            self.controller.close()
+    
+    def _run_headless(self):
+        self._wait_calibration()
+        if not self.running:
+            return
+        self._record_loop(viewer=None)
+    
+    def _run_with_viewer(self):
         def key_callback(keycode):
             if keycode == 259:
                 self.controller.reset()
+            elif keycode == 67:  # C键校准
+                self.controller.calibrate()
         
         with mujoco.viewer.launch_passive(self.controller.model, self.controller.data,
                                           show_left_ui=False, show_right_ui=False,
                                           key_callback=key_callback) as viewer:
             mujoco.mjv_defaultFreeCamera(self.controller.model, viewer.cam)
-            
-            print("[录制] 等待VR校准...")
-            while self.running and not self.controller.vr_calib.done:
+            self._wait_calibration(viewer)
+            if not self.running:
+                return
+            self._record_loop(viewer=viewer)
+    
+    def _wait_calibration(self, viewer=None):
+        print("[录制] 等待VR校准 (按C键或VR手柄B键)...")
+        while self.running and not self.controller.vr_calib.done:
+            if viewer is not None:
                 if not viewer.is_running():
                     self.running = False
                     break
-                vr_data = self.controller.vr.data
-                if vr_data.button_events.right_b:
-                    self.controller.calibrate()
                 viewer.sync()
-                time.sleep(0.05)
+            vr_data = self.controller.vr.data
+            if vr_data.button_events.right_b:
+                self.controller.calibrate()
+            time.sleep(0.05)
+    
+    def _record_loop(self, viewer=None):
+        print("[录制] 开始录制帧数据...")
+        frame_count = 0
+        start_time = time.time()
+        last_record_time = 0.0
+        print_interval = 1.0
+        last_print_time = time.time()
+        
+        while self.running:
+            if viewer is not None and not viewer.is_running():
+                break
             
-            if not self.running:
-                return
+            mit_cmd = self.controller.step()
+            vr_data = self.controller.vr.data
             
-            print("[录制] 开始录制...")
-            frame_count = 0
-            last_record_time = 0.0
+            left_gripper = vr_data.left_hand.gripper * 100.0
+            right_gripper = vr_data.right_hand.gripper * 100.0
             
-            while self.running and viewer.is_running():
-                mit_cmd = self.controller.step()
-                vr_data = self.controller.vr.data
-                
-                now = time.time()
-                if now - last_record_time >= self.record_interval:
-                    self.record_data.add_frame(mit_cmd, 
-                                              vr_data.left_hand.gripper * 100.0,
-                                              vr_data.right_hand.gripper * 100.0)
-                    frame_count += 1
-                    last_record_time = now
-                
+            now = time.time()
+            if now - last_record_time >= self.record_interval:
+                self.record_data.add_frame(mit_cmd, left_gripper, right_gripper)
+                frame_count += 1
+                last_record_time = now
+            
+            if viewer is not None:
                 mujoco.mj_camlight(self.controller.model, self.controller.data)
                 viewer.sync()
-                self.controller.rate.sleep()
-        
-        self.record_data.save(self.output_path)
+            
+            if now - last_print_time >= print_interval:
+                last_print_time = now
+                elapsed = now - start_time
+                print(f"[录制] 帧数: {frame_count} | 时长: {elapsed:.1f}s")
+            
+            self.controller.rate.sleep()
 
 
 # ==================== 回放器 ====================

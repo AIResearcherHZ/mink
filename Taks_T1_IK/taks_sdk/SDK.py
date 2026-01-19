@@ -12,8 +12,7 @@ import time
 import signal
 import serial
 import threading
-from multiprocessing import Process, Event
-from queue import Queue, Empty
+from multiprocessing import Event
 from typing import Dict, Optional
 from collections import deque
 

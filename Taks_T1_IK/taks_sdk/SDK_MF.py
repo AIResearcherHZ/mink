@@ -12,8 +12,7 @@ import os
 import time
 import signal
 import threading
-from queue import Queue, Empty
-from typing import Dict, Optional
+from typing import Optional
 from collections import deque
 
 import pyarrow as pa
