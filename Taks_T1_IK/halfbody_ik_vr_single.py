@@ -1,6 +1,7 @@
-"""半身VR控制IK - SIM2REAL版 (重构版)
+"""半身VR单路IK控制 - Y字形解算 (SIM2REAL版)
 
-解决多路IK跳变: 使用DofFreezingTask作为equality constraint冻结非活动关节
+头部look-at独立计算，不参与IK解算
+腰部低权重：大部分时间直立，只有yaw跟随双手，超距时才位置补偿
 支持taks SDK实现SIM2REAL控制
 """
 
@@ -28,7 +29,7 @@ from taks_sdk import taks
 # ==================== 配置常量 ====================
 
 _XML = Path(__file__).parent / "assets" / "Semi_Taks_T1" / "scene_Semi_Taks_T1.xml"
-TAKS_SEND_RATE = 30  # taks发送频率(Hz), None不限制
+TAKS_SEND_RATE = 30  # taks发送频率(Hz)
 
 # 关节分组
 JOINT_GROUPS = {
@@ -74,57 +75,36 @@ SAFE_KP_KD = {
 RAMP_UP_TIME = 5.0
 RAMP_DOWN_TIME = 5.0
 FEEDFORWARD_SCALE = 0.75
+RAMP_EXPONENT_EASE_OUT = 1.1
+RAMP_EXPONENT_EASE_IN = 0.9
 
-# 非线性缓动参数 (可调)
-
-# 作用: 控制 kp/kd 增益在 ramp up/down 过程中的变化曲线
-# - Ramp Up (缓启动): kp/kd 从 0 渐变到目标值，使电机平滑启动
-# - Ramp Down (缓停止): kp/kd 从当前值渐变到安全值，使电机平滑停止
-
-# RAMP_EXPONENT 参数说明（形象理解）:
-# - 值越大，曲线越弯曲，过渡越平滑
-# - = 1.0: 线性变化，像“匀速走路”
-# - = 2.0: 默认，开始稍快、尾部渐缓
-# - = 3.0: 开始更快、后段更柔，像“先迅速起步再慢慢刹车”
-
-# Ramp Up (ease_out): **开始更快，后面放缓**
-#   - 增大 exponent → kp/kd 前半段冲得更快，越接近目标越慢，避免突然“硬”起来
-# Ramp Down (ease_in): **开始更慢，后面更快**
-#   - 增大 exponent → kp/kd 前半段降得更慢，越接近结束越快归零/安全值，避免“突然塌陷”
-
-RAMP_EXPONENT_EASE_OUT = 1.1  # 用于kp/kd的ramp up和position的ramp down
-RAMP_EXPONENT_EASE_IN = 0.9   # 用于kp/kd的ramp down
-
-# 安全倒向配置: 停止时主动倒向此方向
+# 安全倒向配置
 SAFE_FALL_POSITIONS = {
-    4: 0.2,     # right_elbow_joint
-    12: 0.2,    # left_elbow_joint
-    17: 0.0,    # waist_yaw_joint
-    18: 0.52,    # waist_roll_joint
-    19: -0.45,  # waist_pitch_joint
+    4: 0.2, 12: 0.2,
+    17: 0.0, 18: 0.52, 19: -0.45,
 }
 
-# 腰部自动计算配置
+# 腰部自动计算配置 - 大死区，低权重，只有超距才补偿
 WAIST_AUTO_CONFIG = {
-    'arm_reach': 0.55,          # 手臂有效作业半径(m)
-    'deadzone': 0.05,           # 死区，避免微小移动触发腰部补偿
-    'compensation_gain': 10.0,   # 腰部位置补偿增益
-    'yaw_smooth': 0.1,          # yaw平滑系数 (0-1, 越小越平滑)
-    'pos_smooth': 0.05,         # 位置补偿平滑系数
+    'arm_reach': 0.55,
+    'deadzone': 0.40,           # 大死区
+    'compensation_gain': 0.8,
+    'yaw_smooth': 0.08,
+    'pos_smooth': 0.03,
 }
 
-# 手臂向外向下偏置配置
+# 手臂偏置配置
 ARM_BIAS_CONFIG = {
-    'outward_bias': 0.15,       # 向外偏置强度 (shoulder_roll)
-    'downward_bias': 0.1,       # 向下偏置强度 (elbow)
-    'bias_cost': 1e-3,          # 偏置任务权重
+    'outward_bias': 0.15,
+    'downward_bias': 0.1,
+    'bias_cost': 1e-3,
 }
 
-# 末端执行器: (link, mocap, limbs)
+# 末端执行器
 END_EFFECTORS = {
-    "left_hand": ("left_wrist_pitch_link", "left_hand_target", ["left_arm"]),
-    "right_hand": ("right_wrist_pitch_link", "right_hand_target", ["right_arm"]),
-    "waist": ("neck_yaw_link", "waist_target", ["waist"]),
+    "left_hand": ("left_wrist_pitch_link", "left_hand_target"),
+    "right_hand": ("right_wrist_pitch_link", "right_hand_target"),
+    "waist": ("neck_yaw_link", "waist_target"),
 }
 
 # 碰撞对
@@ -145,15 +125,12 @@ COLLISION_PAIRS = [
 # ==================== 工具函数 ====================
 
 def ease_out(t: float, exp: float = RAMP_EXPONENT_EASE_OUT) -> float:
-    """缓出函数: 开始快，结束慢"""
     return 1.0 - pow(1.0 - t, exp)
 
 def ease_in(t: float, exp: float = RAMP_EXPONENT_EASE_IN) -> float:
-    """缓入函数: 开始慢，结束快"""
     return pow(t, exp)
 
 def slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
-    """四元数球面插值"""
     dot = np.dot(q0, q1)
     if dot < 0:
         q1, dot = -q1, -dot
@@ -165,65 +142,67 @@ def slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
     return r / np.linalg.norm(r)
 
 def compute_waist_yaw_quat(hands_center: np.ndarray, waist_pos: np.ndarray) -> np.ndarray:
-    """计算腰部yaw四元数，让腰部朝向双手中心 (roll=0, pitch=0)"""
+    """计算腰部yaw四元数"""
     direction = hands_center - waist_pos
-    direction[2] = 0  # 忽略垂直分量，只考虑水平方向
+    direction[2] = 0
     dist = np.linalg.norm(direction)
     if dist < 1e-6:
         return np.array([1.0, 0.0, 0.0, 0.0])
-    # 计算yaw角度 (相对于正前X轴)
     yaw = np.arctan2(direction[1], direction[0])
-    # 构建纯yaw四元数 (MuJoCo wxyz)
     cy, sy = np.cos(yaw / 2), np.sin(yaw / 2)
     return np.array([cy, 0.0, 0.0, sy])
 
-
-def compute_waist_compensation(hands_center: np.ndarray, waist_init_pos: np.ndarray, 
+def compute_waist_compensation(hands_center: np.ndarray, waist_init_pos: np.ndarray,
                                 arm_reach: float, deadzone: float, gain: float) -> np.ndarray:
-    """计算腰部位置补偿，当双手超出手臂作业范围时启用"""
-    # 计算双手中心到腰部初始位置的水平距离
+    """计算腰部位置补偿 - 只有超出作业范围才补偿"""
     diff = hands_center - waist_init_pos
-    diff[2] = 0  # 忽略垂直分量
+    diff[2] = 0
     dist = np.linalg.norm(diff)
-    # 在作业范围内不需要补偿
     if dist <= arm_reach - deadzone:
         return np.zeros(3)
-    # 超出范围时计算补偿量
     excess = dist - (arm_reach - deadzone)
     direction = diff / dist if dist > 1e-6 else np.array([1.0, 0.0, 0.0])
     compensation = direction * excess * gain
-    compensation[2] = 0  # 不补偿垂直方向
+    compensation[2] = 0
     return compensation
 
-
 def compute_lookat_quat(head_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
-    """计算look-at四元数(MuJoCo wxyz格式)，只使用yaw和pitch，roll冻结为0"""
+    """计算look-at四元数，只使用yaw和pitch，roll=0"""
     direction = target_pos - head_pos
     dist = np.linalg.norm(direction)
     if dist < 1e-6:
         return np.array([1.0, 0.0, 0.0, 0.0])
     direction /= dist
-    # 计算yaw(绕Z轴): 在XY平面上的投影方向
     yaw = np.arctan2(direction[1], direction[0])
-    # 计算pitch(绕Y轴): 垂直方向的角度
     horizontal_dist = np.sqrt(direction[0]**2 + direction[1]**2)
-    pitch = -np.arctan2(direction[2], horizontal_dist)  # 负号是因为pitch向下为正
-    # 构建四元数: 先yaw后pitch (roll=0)
+    pitch = -np.arctan2(direction[2], horizontal_dist)
     cy, sy = np.cos(yaw / 2), np.sin(yaw / 2)
     cp, sp = np.cos(pitch / 2), np.sin(pitch / 2)
-    # q = q_yaw * q_pitch (MuJoCo wxyz格式)
     w = cy * cp
     x = cy * sp
     y = sy * sp
     z = sy * cp
     return np.array([w, x, y, z])
 
+def set_neck_from_lookat(cfg, model, lookat_quat) -> np.ndarray:
+    """直接设置neck关节角度实现look-at"""
+    w, x, y, z = lookat_quat
+    yaw = np.arctan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+    pitch = np.arcsin(np.clip(2*(w*y - z*x), -1, 1))
+    neck_yaw_idx = model.jnt_qposadr[model.joint("neck_yaw_joint").id]
+    neck_pitch_idx = model.jnt_qposadr[model.joint("neck_pitch_joint").id]
+    neck_roll_idx = model.jnt_qposadr[model.joint("neck_roll_joint").id]
+    q = cfg.q.copy()
+    q[neck_yaw_idx] = yaw
+    q[neck_pitch_idx] = pitch
+    q[neck_roll_idx] = 0.0
+    return q
+
 
 # ==================== 状态数据类 ====================
 
 @dataclass
 class VRCalibState:
-    """VR校准状态"""
     done: bool = False
     left: np.ndarray = field(default_factory=lambda: np.zeros(3))
     right: np.ndarray = field(default_factory=lambda: np.zeros(3))
@@ -231,7 +210,6 @@ class VRCalibState:
 
 @dataclass
 class ResetState:
-    """复位状态"""
     active: bool = False
     alpha: float = 0.0
     start_q: Optional[np.ndarray] = None
@@ -240,7 +218,6 @@ class ResetState:
 
 @dataclass
 class RampState:
-    """启动渐变状态"""
     active: bool = True
     start_time: Optional[float] = None
     progress: float = 0.0
@@ -249,14 +226,13 @@ class RampState:
 
 # ==================== 控制器类 ====================
 
-class HalfBodyIKController:
-    """半身IK控制器"""
+class HalfBodyIKControllerSingle:
+    """半身单路IK控制器"""
     
     def __init__(self, host: str = "192.168.5.4", port: int = 5555,
                  enable_real: bool = True, headless: bool = False,
                  ramp_up_time: float = RAMP_UP_TIME, ramp_down_time: float = RAMP_DOWN_TIME,
                  enable_ramp_up: bool = True, enable_ramp_down: bool = True):
-        # 配置
         self.host = host
         self.port = port
         self.enable_real = enable_real
@@ -266,22 +242,18 @@ class HalfBodyIKController:
         self.enable_ramp_up = enable_ramp_up
         self.enable_ramp_down = enable_ramp_down
         
-        # 运行状态
         self.running = True
         self.shutdown_requested = False
         
-        # 设备句柄
         self.robot = None
         self.left_gripper = None
         self.right_gripper = None
         self.sdk_proc = None
         
-        # 状态对象
         self.vr_calib = VRCalibState()
         self.reset_state = ResetState()
         self.ramp_state = RampState(active=enable_ramp_up, progress=0.0 if enable_ramp_up else 1.0)
         
-        # 统计
         self.frame_count = 0
         self.fps_start_time = time.time()
         self.current_fps = 0.0
@@ -291,31 +263,31 @@ class HalfBodyIKController:
         self.last_taks_send_time = 0.0
         self.last_mit_cmd = {}
         
-        # 初始化
         self._init_mujoco()
         self._init_vr()
         self._init_real()
         self._init_tasks()
         self._save_init_state()
         
-        # 控制参数
         self.rate = RateLimiter(frequency=200.0, warn=False)
         self.dt = self.rate.dt
         self.reset_duration = 1.5
         self.console = Console()
     
     def _init_mujoco(self):
-        """初始化MuJoCo模型"""
         self.model = mujoco.MjModel.from_xml_path(_XML.as_posix())
         self.cfg = mink.Configuration(self.model)
         self.model, self.data = self.cfg.model, self.cfg.data
         
-        # 预计算DOF索引
         self.joint_idx = {k: [self.model.jnt_dofadr[self.model.joint(j).id] for j in v] 
                           for k, v in JOINT_GROUPS.items()}
-        self.all_dof_indices = sorted(set(sum(self.joint_idx.values(), [])))
+        # 非neck的DOF索引
+        self.ik_dof_indices = []
+        for limb in JOINT_GROUPS:
+            if limb != "neck":
+                self.ik_dof_indices.extend(self.joint_idx[limb])
+        self.ik_dof_indices = sorted(set(self.ik_dof_indices))
         
-        # 构建关节映射
         self.joint_mapping = {}
         for group, names in JOINT_GROUPS.items():
             for jname in names:
@@ -328,23 +300,17 @@ class HalfBodyIKController:
                         'sdk_id': sdk_id
                     }
         
-        # mocap ID
         self.mocap_ids = {name: self.model.body(mocap).mocapid[0] 
-                          for name, (_, mocap, _) in END_EFFECTORS.items()}
-        self.ee_limbs = {name: limbs for name, (_, _, limbs) in END_EFFECTORS.items()}
-        self.neck_pitch_mid = self.model.body("neck_pitch_target").mocapid[0]
+                          for name, (_, mocap) in END_EFFECTORS.items()}
+        self.neck_dof_indices = [int(i) for i in self.joint_idx["neck"]]
     
     def _init_vr(self):
-        """初始化VR接收器"""
         self.vr = VRReceiver()
         self.vr.start()
     
     def _init_real(self):
-        """初始化真机连接"""
         if not self.enable_real:
             return
-        
-        # 本机模式自动启动SDK
         is_local = self.host in ("127.0.0.1", "localhost")
         if is_local:
             self.sdk_proc = self._start_local_sdk()
@@ -352,7 +318,6 @@ class HalfBodyIKController:
                 print("[SDK] 本机SDK启动失败，切换到仅仿真模式")
                 self.enable_real = False
                 return
-        
         try:
             taks.connect(self.host, cmd_port=self.port)
             self.robot = taks.register("Taks-T1-semibody")
@@ -370,7 +335,6 @@ class HalfBodyIKController:
             self.enable_real = False
     
     def _start_local_sdk(self) -> Optional[subprocess.Popen]:
-        """启动本机SDK服务端"""
         sdk_path = Path(__file__).parent / "taks_sdk" / "SDK_MF.py"
         if not sdk_path.exists():
             print(f"[SDK] 错误: SDK_MF.py 不存在: {sdk_path}")
@@ -386,19 +350,22 @@ class HalfBodyIKController:
         return proc
     
     def _init_tasks(self):
-        """初始化IK任务"""
         self.tasks = [
             mink.FrameTask("base_link", "body", position_cost=1e6, orientation_cost=1e6),
             mink.PostureTask(self.model, cost=1e-2),
         ]
-        for name, (link, _, _) in END_EFFECTORS.items():
-            cost = (2.0, 2.0)  # 腰部位置姿态都关注
-            self.tasks.append(mink.FrameTask(link, "body", position_cost=cost[0], orientation_cost=cost[1]))
-        self.neck_task = mink.FrameTask("neck_pitch_link", "body", position_cost=0.0, orientation_cost=1.0)  # 头只关注姿态
-        self.tasks.append(self.neck_task)
-        self.ee_tasks = {name: self.tasks[i+2] for i, name in enumerate(END_EFFECTORS.keys())}
+        # 末端任务
+        self.ee_tasks = {}
+        for name, (link, _) in END_EFFECTORS.items():
+            if name == "waist":
+                # 腰部低权重
+                task = mink.FrameTask(link, "body", position_cost=0.0, orientation_cost=0.0)
+            else:
+                task = mink.FrameTask(link, "body", position_cost=2.0, orientation_cost=2.0)
+            self.tasks.append(task)
+            self.ee_tasks[name] = task
         
-        # 手臂偏置任务 (向外向下)
+        # 手臂偏置任务
         self.arm_posture_task = mink.PostureTask(self.model, cost=ARM_BIAS_CONFIG['bias_cost'])
         bias_q = self.cfg.q.copy()
         bias_q[self.model.jnt_qposadr[self.model.joint("right_shoulder_roll_joint").id]] = -ARM_BIAS_CONFIG['outward_bias']
@@ -408,9 +375,6 @@ class HalfBodyIKController:
         self.arm_posture_task.set_target(bias_q)
         self.tasks.append(self.arm_posture_task)
         
-        # neck_roll的DOF索引 (用于冻结)
-        self.neck_roll_dof = int(self.model.jnt_dofadr[self.model.joint("neck_roll_joint").id])
-        
         self.limits = [
             mink.ConfigurationLimit(self.model),
             mink.VelocityLimit(self.model),
@@ -419,31 +383,23 @@ class HalfBodyIKController:
                                          collision_detection_distance=0.1)
         ]
         
-        # 初始化配置
         self.cfg.update_from_keyframe("home")
         self.tasks[0].set_target_from_configuration(self.cfg)
         self.tasks[1].set_target_from_configuration(self.cfg)
-        for name, (link, mocap, _) in END_EFFECTORS.items():
+        for name, (link, mocap) in END_EFFECTORS.items():
             mink.move_mocap_to_frame(self.model, self.data, mocap, link, "body")
             self.ee_tasks[name].set_target_from_configuration(self.cfg)
-        mink.move_mocap_to_frame(self.model, self.data, "neck_pitch_target", "neck_pitch_link", "body")
-        self.neck_task.set_target_from_configuration(self.cfg)
     
     def _save_init_state(self):
-        """保存初始状态"""
         self.init_q = self.cfg.q.copy()
         self.init_pos = {name: self.data.mocap_pos[mid].copy() for name, mid in self.mocap_ids.items()}
         self.init_quat = {name: self.data.mocap_quat[mid].copy() for name, mid in self.mocap_ids.items()}
         self.prev_pos = {name: pos.copy() for name, pos in self.init_pos.items()}
         self.prev_quat = {name: quat.copy() for name, quat in self.init_quat.items()}
-        # 腰部自动计算状态
         self.waist_smooth_quat = self.init_quat["waist"].copy()
         self.waist_smooth_compensation = np.zeros(3)
     
-    # ==================== 公共方法 ====================
-    
     def calibrate(self):
-        """VR校准"""
         vr_data = self.vr.data
         if not vr_data.tracking_enabled:
             print("[VR] 未启用追踪，无法校准")
@@ -459,7 +415,6 @@ class HalfBodyIKController:
         print(f"[VR] 校准完成")
     
     def reset(self):
-        """开始复位"""
         self.reset_state.active = True
         self.reset_state.alpha = 0.0
         self.reset_state.start_q = self.cfg.q.copy()
@@ -470,7 +425,6 @@ class HalfBodyIKController:
         print("[Reset] 复位开始...")
     
     def get_real_positions(self, timeout: float = 2.0) -> Dict[int, float]:
-        """获取真机当前位置"""
         if not self.enable_real or self.robot is None:
             return {info['sdk_id']: 0.0 for info in self.joint_mapping.values()}
         start = time.time()
@@ -485,7 +439,6 @@ class HalfBodyIKController:
     
     def build_mit_cmd(self, q_arr: np.ndarray, tau_arr: np.ndarray, 
                       ramp_progress: float = 1.0) -> Dict[int, Dict[str, float]]:
-        """构建MIT命令字典"""
         mit_cmd = {}
         kp_kd_scale = ease_out(ramp_progress) if ramp_progress < 1.0 else 1.0
         for jname, info in self.joint_mapping.items():
@@ -502,7 +455,6 @@ class HalfBodyIKController:
         return mit_cmd
     
     def send_to_real(self, mit_cmd: Dict[int, Dict[str, float]]) -> bool:
-        """发送MIT命令到真机"""
         if not self.enable_real or self.robot is None or not mit_cmd:
             return False
         if TAKS_SEND_RATE:
@@ -515,7 +467,6 @@ class HalfBodyIKController:
         return True
     
     def send_gripper(self, left_val: float, right_val: float):
-        """发送夹爪控制"""
         if not self.enable_real:
             return
         left_percent = np.clip(left_val * 100.0, 0.0, 100.0)
@@ -528,7 +479,6 @@ class HalfBodyIKController:
             self.right_gripper.controlMIT(percent=right_percent, kp=kp, kd=kd)
     
     def ramp_up(self):
-        """缓启动"""
         if not self.enable_ramp_up:
             self.ramp_state.active = False
             self.ramp_state.progress = 1.0
@@ -540,7 +490,6 @@ class HalfBodyIKController:
         print(f"[Ramp Up] 线性启动 ({self.ramp_up_time}s)...")
     
     def ramp_down(self):
-        """缓停止"""
         if not self.enable_real or self.robot is None:
             return
         if not self.enable_ramp_down:
@@ -565,7 +514,6 @@ class HalfBodyIKController:
                 kp_safe, kd_safe = SAFE_KP_KD.get(sdk_id, (5.0, 1.0))
                 kp_val = kp_safe + (kp_target - kp_safe) * kp_kd_scale
                 kd_val = kd_safe + (kd_target - kd_safe) * kp_kd_scale
-                # 使用安全倒向位置(如果配置了), position用ease_out
                 start_q = start_positions.get(sdk_id, 0.0)
                 target_q = SAFE_FALL_POSITIONS.get(sdk_id, start_q)
                 q_val = start_q + (target_q - start_q) * ease_out(t)
@@ -573,7 +521,6 @@ class HalfBodyIKController:
             self.robot.controlMIT(mit_cmd)
             time.sleep(0.001)
         
-        # 失能(使用最终的安全倒向位置)
         mit_cmd = {}
         for info in self.joint_mapping.values():
             sdk_id = info['sdk_id']
@@ -584,8 +531,7 @@ class HalfBodyIKController:
         print("[Ramp Down] 已降低到安全kp/kd并失能")
     
     def build_status_table(self) -> Table:
-        """构建rich状态表格"""
-        table = Table(title="TAKS MIT控制状态", show_header=True, header_style="bold cyan")
+        table = Table(title="TAKS MIT控制状态 (单路IK)", show_header=True, header_style="bold cyan")
         table.add_column("ID", style="dim", width=3)
         table.add_column("关节名", width=28)
         table.add_column("q(rad)", justify="right", width=8)
@@ -609,7 +555,6 @@ class HalfBodyIKController:
         return table
     
     def step(self) -> Dict[int, Dict[str, float]]:
-        """执行一步控制，返回MIT命令"""
         # 更新启动进度
         if self.ramp_state.active:
             elapsed = time.time() - self.ramp_state.start_time
@@ -625,70 +570,57 @@ class HalfBodyIKController:
         right_mid = self.mocap_ids["right_hand"]
         waist_mid = self.mocap_ids["waist"]
         
-        # VR按键事件
+        # VR按键
         if vr_data.button_events.right_b:
             self.calibrate()
         if vr_data.button_events.right_a:
             self.reset()
         
-        # VR数据更新mocap (腰部不再由VR头部控制，改为自动计算)
+        # VR更新mocap
         if self.vr_calib.done and vr_data.tracking_enabled:
             self.data.mocap_pos[left_mid] = vr_data.left_hand.position + self.vr_calib.left
             self.data.mocap_quat[left_mid] = vr_data.left_hand.quaternion
             self.data.mocap_pos[right_mid] = vr_data.right_hand.position + self.vr_calib.right
             self.data.mocap_quat[right_mid] = vr_data.right_hand.quaternion
         
-        # 腰部自动计算: yaw跟随双手中心, 位置在超出手臂范围时补偿
+        # 腰部自动计算 - yaw跟随，位置超距补偿
         hands_center = (self.data.mocap_pos[left_mid] + self.data.mocap_pos[right_mid]) / 2.0
         waist_init_pos = self.init_pos["waist"]
-        cfg = WAIST_AUTO_CONFIG
-        # 计算目标yaw四元数
+        cfg_w = WAIST_AUTO_CONFIG
         target_yaw_quat = compute_waist_yaw_quat(hands_center, waist_init_pos)
-        # 平滑插值yaw
-        self.waist_smooth_quat = slerp(self.waist_smooth_quat, target_yaw_quat, cfg['yaw_smooth'])
+        self.waist_smooth_quat = slerp(self.waist_smooth_quat, target_yaw_quat, cfg_w['yaw_smooth'])
         self.data.mocap_quat[waist_mid] = self.waist_smooth_quat
-        # 计算位置补偿
         target_compensation = compute_waist_compensation(
-            hands_center, waist_init_pos, cfg['arm_reach'], cfg['deadzone'], cfg['compensation_gain'])
-        # 平滑插值位置补偿
+            hands_center, waist_init_pos, cfg_w['arm_reach'], cfg_w['deadzone'], cfg_w['compensation_gain'])
         self.waist_smooth_compensation = (
-            (1 - cfg['pos_smooth']) * self.waist_smooth_compensation + cfg['pos_smooth'] * target_compensation)
+            (1 - cfg_w['pos_smooth']) * self.waist_smooth_compensation + cfg_w['pos_smooth'] * target_compensation)
         self.data.mocap_pos[waist_mid] = waist_init_pos + self.waist_smooth_compensation
         
-        # look-at目标
-        hands_center = (self.data.mocap_pos[left_mid] + self.data.mocap_pos[right_mid]) / 2.0
+        # 头部look-at独立计算
         head_pos = self.data.xpos[self.model.body("neck_pitch_link").id]
-        self.data.mocap_quat[self.neck_pitch_mid] = compute_lookat_quat(head_pos, hands_center)
-        self.neck_task.set_target(mink.SE3.from_mocap_id(self.data, self.neck_pitch_mid))
+        lookat_quat = compute_lookat_quat(head_pos, hands_center)
         
         # 复位处理
         if self.reset_state.active:
-            return self._step_reset()
+            return self._step_reset(lookat_quat)
         
         # 更新末端任务目标
         for name, mid in self.mocap_ids.items():
             self.ee_tasks[name].set_target(mink.SE3.from_mocap_id(self.data, mid))
         
-        # 检测活动肢体 (neck_roll始终冻结)
-        active_dofs = set(int(i) for i in self.joint_idx["neck"]) - {self.neck_roll_dof}
-        for name, mid in self.mocap_ids.items():
-            pos_diff = self.data.mocap_pos[mid] - self.prev_pos[name]
-            quat_diff = np.abs(self.data.mocap_quat[mid] - self.prev_quat[name])
-            # waist也检测位置变化
-            if np.dot(pos_diff, pos_diff) > 1e-7 or np.max(quat_diff) > 0.005:
-                for limb in self.ee_limbs[name]:
-                    active_dofs.update(self.joint_idx[limb])
-            self.prev_pos[name] = self.data.mocap_pos[mid].copy()
-            self.prev_quat[name] = self.data.mocap_quat[mid].copy()
-        
-        # 构建冻结约束
-        frozen_dofs = [i for i in self.all_dof_indices if i not in active_dofs]
-        constraints = [mink.DofFreezingTask(self.model, dof_indices=frozen_dofs)] if frozen_dofs else []
-        
-        # 求解IK
-        vel = mink.solve_ik(self.cfg, self.tasks, self.dt, "daqp", damping=2e-1, 
-                            limits=self.limits, constraints=constraints)
+        # 冻结neck，单路IK解算
+        constraints = [mink.DofFreezingTask(self.model, dof_indices=self.neck_dof_indices)]
+        try:
+            vel = mink.solve_ik(self.cfg, self.tasks, self.dt, "daqp", damping=1e-1, 
+                                limits=self.limits, constraints=constraints)
+        except mink.exceptions.NoSolutionFound:
+            vel = mink.solve_ik(self.cfg, self.tasks, self.dt, "daqp", damping=1.0, 
+                                limits=self.limits, constraints=[])
         self.cfg.integrate_inplace(vel, self.dt)
+        
+        # 独立设置neck关节
+        q_with_neck = set_neck_from_lookat(self.cfg, self.model, lookat_quat)
+        self.cfg.update(q_with_neck)
         
         # 前馈扭矩
         mujoco.mj_forward(self.model, self.data)
@@ -704,8 +636,7 @@ class HalfBodyIKController:
         
         return mit_cmd
     
-    def _step_reset(self) -> Dict[int, Dict[str, float]]:
-        """复位步骤"""
+    def _step_reset(self, lookat_quat) -> Dict[int, Dict[str, float]]:
         self.reset_state.alpha += self.dt / self.reset_duration
         alpha = min(1.0, self.reset_state.alpha)
         
@@ -719,22 +650,20 @@ class HalfBodyIKController:
         for name in END_EFFECTORS:
             self.ee_tasks[name].set_target_from_configuration(self.cfg)
         
-        mask = np.zeros(self.model.nv, dtype=bool)
-        for idx in self.joint_idx["neck"]:
-            if idx != self.neck_roll_dof:  # 跳过neck_roll
-                mask[idx] = True
-        # 冻结neck_roll
-        frozen_dofs_reset = [self.neck_roll_dof]
-        constraints_reset = [mink.DofFreezingTask(self.model, dof_indices=frozen_dofs_reset)]
-        self.tasks[1].cost[:] = np.where(mask, 1e-2, 1e4)
-        
-        vel = mink.solve_ik(self.cfg, self.tasks, self.dt, "daqp", damping=0.5, limits=self.limits, constraints=constraints_reset)
-        vel[~mask] = 0.0
+        # 冻结neck
+        constraints = [mink.DofFreezingTask(self.model, dof_indices=self.neck_dof_indices)]
+        try:
+            vel = mink.solve_ik(self.cfg, self.tasks, self.dt, "daqp", damping=0.5, limits=self.limits, constraints=constraints)
+        except mink.exceptions.NoSolutionFound:
+            vel = mink.solve_ik(self.cfg, self.tasks, self.dt, "daqp", damping=1.0, limits=self.limits, constraints=[])
         self.cfg.integrate_inplace(vel, self.dt)
+        
+        # 独立设置neck
+        q_with_neck = set_neck_from_lookat(self.cfg, self.model, lookat_quat)
+        self.cfg.update(q_with_neck)
         
         if alpha >= 1.0:
             self.reset_state.active = False
-            self.tasks[1].cost[:] = 1e-2
             print("[Reset] 复位完成")
         
         mujoco.mj_forward(self.model, self.data)
@@ -745,7 +674,6 @@ class HalfBodyIKController:
         return mit_cmd
     
     def update_stats(self):
-        """更新帧率统计"""
         self.frame_count += 1
         now = time.time()
         if now - self.fps_start_time >= 1.0:
@@ -757,102 +685,64 @@ class HalfBodyIKController:
             self.send_count = 0
             self.send_fps_start = now
     
-    def key_callback(self, keycode: int):
-        """键盘回调"""
-        if keycode == 259:  # BACKSPACE
-            self.reset()
-        elif keycode == 67:  # C
-            self.calibrate()
-    
-    def cleanup(self):
-        """清理资源"""
+    def shutdown(self):
         self.running = False
-        print()  # 换行，避免无头模式下的\r残留
-        
-        # 先执行ramp_down（需要SDK通信），再关闭SDK
-        if self.enable_real:
-            self.ramp_down()  # 必须在SDK关闭前完成
-            taks.disconnect()
-            print("[TAKS] 已断开")
-        
-        # SDK进程必须在ramp_down之后关闭
-        if self.sdk_proc is not None:
-            print("[SDK] 关闭本机SDK服务端...")
-            self.sdk_proc.terminate()
-            try:
-                self.sdk_proc.wait(timeout=3.0)
-            except subprocess.TimeoutExpired:
-                self.sdk_proc.kill()
-            print("[SDK] SDK服务端已关闭")
-        
-        # VR最后关闭
         self.vr.stop()
+        self.ramp_down()
+        if self.sdk_proc is not None:
+            self.sdk_proc.terminate()
+            self.sdk_proc.wait(timeout=5)
+            print("[SDK] 本机SDK已停止")
     
     def run(self):
-        """主运行循环"""
-        # 信号处理
+        """主循环"""
         def signal_handler(signum, frame):
-            if self.shutdown_requested:
-                print("\n[强制退出]")
-                if self.enable_real:
-                    taks.disconnect()
-                sys.exit(1)
-            print("\n[收到退出信号] 开始安全关闭...")
             self.shutdown_requested = True
-            self.running = False
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
         
-        mode_str = "有头" if not self.headless else "无头"
-        real_str = "SIM2REAL" if self.enable_real else "仅仿真"
-        rate_str = f"{TAKS_SEND_RATE:.0f}Hz" if TAKS_SEND_RATE else "无限制"
-        print(f"[Info] 模式: {mode_str}, {real_str}, taks发送频率: {rate_str}")
-        print("[Info] 键盘: C=校准, Backspace=复位 | VR手柄: B双击=校准, A双击=复位")
-        
-        try:
-            if self.headless:
-                print("[Info] 无头模式运行中，Ctrl+C退出")
-                self._control_loop(viewer=None)
-            else:
-                with mujoco.viewer.launch_passive(self.model, self.data, show_left_ui=False, 
-                                                   show_right_ui=False, 
-                                                   key_callback=self.key_callback) as viewer:
-                    mujoco.mjv_defaultFreeCamera(self.model, viewer.cam)
-                    self._control_loop(viewer=viewer)
-        except KeyboardInterrupt:
-            print("\n[Info] 用户中断")
-        finally:
-            self.cleanup()
-    
-    def _control_loop(self, viewer=None):
-        """控制循环"""
         self.ramp_up()
-        print_interval = 1.0
-        last_print_time = time.time()
         
-        while self.running:
-            if viewer is not None and not viewer.is_running():
-                break
+        if self.headless:
+            print("[Headless] 无头模式运行")
+            while self.running and not self.shutdown_requested:
+                self.step()
+                self.update_stats()
+                if self.frame_count % 100 == 0:
+                    self.console.clear()
+                    self.console.print(self.build_status_table())
+                self.rate.sleep()
+        else:
+            def key_callback(keycode):
+                if keycode == 259:  # BACKSPACE
+                    self.reset()
+                elif keycode == 67:  # C
+                    self.calibrate()
             
-            self.step()
-            self.update_stats()
-            
-            now = time.time()
-            if now - last_print_time >= print_interval and self.last_mit_cmd:
-                last_print_time = now
-                self.console.clear()
-                self.console.print(self.build_status_table())
-            
-            if viewer:
-                mujoco.mj_camlight(self.model, self.data)
-                viewer.sync()
-            self.rate.sleep()
+            with mujoco.viewer.launch_passive(self.model, self.data, show_left_ui=False, 
+                                               show_right_ui=False, key_callback=key_callback) as viewer:
+                mujoco.mjv_defaultFreeCamera(self.model, viewer.cam)
+                
+                print_counter = 0
+                while viewer.is_running() and not self.shutdown_requested:
+                    self.step()
+                    self.update_stats()
+                    
+                    print_counter += 1
+                    if print_counter >= 200:
+                        print_counter = 0
+                        self.console.clear()
+                        self.console.print(self.build_status_table())
+                    
+                    mujoco.mj_camlight(self.model, self.data)
+                    viewer.sync()
+                    self.rate.sleep()
+        
+        self.shutdown()
 
 
-# ==================== 命令行入口 ====================
-
-def parse_args():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="半身VR控制IK - SIM2REAL")
     parser.add_argument("--headless", action="store_true", default=False, help="无头模式")
     parser.add_argument("--host", type=str, default="192.168.5.4", help="taks服务器地址")
@@ -860,25 +750,11 @@ def parse_args():
     parser.add_argument("--no-real", action="store_true", default=True, help="禁用真机控制")
     parser.add_argument("--no-ramp-up", action="store_true", default=True, help="禁用缓启动")
     parser.add_argument("--no-ramp-down", action="store_true", default=True, help="禁用缓停止")
-    parser.add_argument("--ramp-up-time", type=float, default=RAMP_UP_TIME, help="缓启动时间(秒)")
-    parser.add_argument("--ramp-down-time", type=float, default=RAMP_DOWN_TIME, help="缓停止时间(秒)")
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-    controller = HalfBodyIKController(
-        host=args.host,
-        port=args.port,
-        enable_real=not args.no_real,
-        headless=args.headless,
-        ramp_up_time=args.ramp_up_time,
-        ramp_down_time=args.ramp_down_time,
-        enable_ramp_up=not args.no_ramp_up,
-        enable_ramp_down=not args.no_ramp_down,
+    args = parser.parse_args()
+    
+    controller = HalfBodyIKControllerSingle(
+        host=args.host, port=args.port,
+        enable_real=not args.no_real, headless=args.headless,
+        enable_ramp_up=not args.no_ramp_up, enable_ramp_down=not args.no_ramp_down
     )
     controller.run()
-
-
-if __name__ == "__main__":
-    main()

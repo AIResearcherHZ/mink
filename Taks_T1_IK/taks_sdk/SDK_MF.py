@@ -200,11 +200,12 @@ class BodyPartWorker:
         self.running = True
         self.registered = False
         
-        # 命令队列
-        self.cmd_queue = Queue(maxsize=100)
-        # MIT命令覆盖缓存
+        # 命令队列 (减小队列大小避免堆积)
+        self.cmd_queue = Queue(maxsize=10)
+        # MIT命令覆盖缓存 (直接覆盖，不入队)
         self._latest_mit_cmd: Optional[Dict] = None
         self._mit_lock = Lock()
+        self._mit_updated = False  # 标记是否有新MIT命令
         # 夹爪命令覆盖缓存
         self._latest_gripper_cmd: Dict[int, Dict] = {}
         self._gripper_lock = Lock()
@@ -220,44 +221,39 @@ class BodyPartWorker:
     def _run(self):
         while self.running:
             try:
-                # 1. 处理队列命令
-                while True:
-                    try:
-                        msg = self.cmd_queue.get_nowait()
-                        cmd = msg.get('cmd', '')
-                        if cmd == 'register':
-                            self._register_motors()
-                        elif cmd == 'disable_all':
-                            self._disable_motors()
-                        elif cmd == 'mit':
-                            joints = msg.get('joints', {})
-                            with self._mit_lock:
-                                if self._latest_mit_cmd is None:
-                                    self._latest_mit_cmd = joints
-                                else:
-                                    self._latest_mit_cmd.update(joints)
-                        elif cmd == 'gripper_oc':
-                            gripper_id = msg.get('gripper_id')
-                            with self._gripper_lock:
-                                self._latest_gripper_cmd[gripper_id] = {'type': 'oc', 'close': msg.get('close', False)}
-                        elif cmd == 'gripper_pos':
-                            gripper_id = msg.get('gripper_id')
-                            with self._gripper_lock:
-                                self._latest_gripper_cmd[gripper_id] = {'type': 'pos', 'percent': msg.get('percent', 0)}
-                        elif cmd == 'gripper_mit':
-                            gripper_id = msg.get('gripper_id')
-                            with self._gripper_lock:
-                                self._latest_gripper_cmd[gripper_id] = {
-                                    'type': 'mit', 'percent': msg.get('percent', 0),
-                                    'kp': msg.get('kp'), 'kd': msg.get('kd')
-                                }
-                    except Empty:
-                        break
+                # 1. 处理队列命令 (注册/失能等低频命令)
+                try:
+                    msg = self.cmd_queue.get_nowait()
+                    cmd = msg.get('cmd', '')
+                    if cmd == 'register':
+                        self._register_motors()
+                    elif cmd == 'disable_all':
+                        self._disable_motors()
+                    elif cmd == 'gripper_oc':
+                        gripper_id = msg.get('gripper_id')
+                        with self._gripper_lock:
+                            self._latest_gripper_cmd[gripper_id] = {'type': 'oc', 'close': msg.get('close', False)}
+                    elif cmd == 'gripper_pos':
+                        gripper_id = msg.get('gripper_id')
+                        with self._gripper_lock:
+                            self._latest_gripper_cmd[gripper_id] = {'type': 'pos', 'percent': msg.get('percent', 0)}
+                    elif cmd == 'gripper_mit':
+                        gripper_id = msg.get('gripper_id')
+                        with self._gripper_lock:
+                            self._latest_gripper_cmd[gripper_id] = {
+                                'type': 'mit', 'percent': msg.get('percent', 0),
+                                'kp': msg.get('kp'), 'kd': msg.get('kd')
+                            }
+                except Empty:
+                    pass
                 
-                # 2. 执行最新MIT命令
+                # 2. 执行最新MIT命令 (直接从缓存读取，不经过队列)
+                mit_cmd = None
                 with self._mit_lock:
-                    mit_cmd = self._latest_mit_cmd
-                    self._latest_mit_cmd = None
+                    if self._mit_updated:
+                        mit_cmd = self._latest_mit_cmd
+                        self._latest_mit_cmd = None
+                        self._mit_updated = False
                 if mit_cmd:
                     self._mit(mit_cmd)
                 
@@ -275,9 +271,9 @@ class BodyPartWorker:
                         self._gripper_mit(gripper_id, cmd_data.get('percent', 0), 
                                          cmd_data.get('kp'), cmd_data.get('kd'))
                 
-                # 无命令时短暂休眠
+                # 无命令时省略sleep，让出资源但不阻塞
                 if not mit_cmd and not gripper_cmds:
-                    time.sleep(0.001)
+                    time.sleep(0.0001)  # 缩短休眠时间
                     
             except Exception as e:
                 print(f"{self.name} 命令处理错误: {e}")
@@ -377,7 +373,6 @@ class BodyPartWorker:
                     ankle_data[pair]['roll'] = (motor, q, dq, tau, kp, kd)
             else:
                 self.dm_mc.controlMIT(motor, kp, kd, q, dq, tau)
-                time.sleep(0.001)
         
         # 处理踝关节
         for pair, data in ankle_data.items():
@@ -386,7 +381,6 @@ class BodyPartWorker:
                 m_roll, roll, roll_vel, tau_roll, _, _ = data['roll']
                 self.dm_mc.controlMIT_ankle(m_pitch, m_roll, kp, kd, pitch, roll, 
                                            pitch_vel, roll_vel, tau_pitch, tau_roll)
-                time.sleep(0.001)
     
     def _get_gripper_direction(self, gripper_id: int) -> int:
         if gripper_id == LEFT_GRIPPER_ID:
@@ -407,7 +401,6 @@ class BodyPartWorker:
         pos = GRIPPER_CLOSE if close else GRIPPER_OPEN
         actual_pos = pos * self._get_gripper_direction(gripper_id)
         self.dm_mc.controlMIT(motor, cfg[1], cfg[2], actual_pos, 0, 0)
-        time.sleep(0.001)
 
     def _gripper_pos(self, gripper_id: int, percent: float):
         with self.motor_lock:
@@ -417,7 +410,6 @@ class BodyPartWorker:
         cfg = JOINT_CONFIG.get(gripper_id, (None, 0.5, 0.05))
         actual_pos = self._gripper_percent_to_pos(percent, gripper_id)
         self.dm_mc.controlMIT(motor, cfg[1], cfg[2], actual_pos, 0, 0)
-        time.sleep(0.001)
 
     def _gripper_mit(self, gripper_id: int, percent: float, kp: float = None, kd: float = None):
         with self.motor_lock:
@@ -429,7 +421,6 @@ class BodyPartWorker:
         use_kd = kd if kd is not None else cfg[2]
         actual_pos = self._gripper_percent_to_pos(percent, gripper_id)
         self.dm_mc.controlMIT(motor, use_kp, use_kd, actual_pos, 0, 0)
-        time.sleep(0.001)
     
     def put_cmd(self, cmd: dict, priority: bool = False):
         """放入命令队列"""
@@ -448,6 +439,15 @@ class BodyPartWorker:
                 except Full:
                     return False
             return False
+    
+    def put_mit_cmd(self, joints: dict):
+        """直接设置MIT命令 (不经过队列，立即覆盖)"""
+        with self._mit_lock:
+            if self._latest_mit_cmd is None:
+                self._latest_mit_cmd = joints
+            else:
+                self._latest_mit_cmd.update(joints)
+            self._mit_updated = True
 
 
 # ============ Zenoh Pub/Sub服务器 ============
@@ -665,14 +665,14 @@ class MotorServer:
             elif cmd == 'mit':
                 joints = msg.get('joints', {})
                 joints = {int(k): v for k, v in joints.items()}
-                # 按部位分发
+                # 按部位分发 (使用put_mit_cmd直接覆盖，不入队)
                 by_worker = {}
                 for jid, val in joints.items():
                     worker_name = get_can_for_joint(jid)
                     if worker_name and worker_name in self.workers:
                         by_worker.setdefault(worker_name, {})[jid] = val
                 for name, worker_joints in by_worker.items():
-                    self.workers[name].put_cmd({'cmd': 'mit', 'joints': worker_joints})
+                    self.workers[name].put_mit_cmd(worker_joints)
             elif cmd == 'gripper_oc':
                 gripper_id = msg.get('gripper_id')
                 close = msg.get('close', False)
