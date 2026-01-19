@@ -6,6 +6,7 @@
 import socket
 import json
 import threading
+import time
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, Callable
@@ -41,6 +42,7 @@ class VRData:
     right_hand: VRPose = field(default_factory=VRPose)
     tracking_enabled: bool = False
     timestamp: float = 0.0
+    total_offset: float = 0.0  # 总偏移量(米)
     button_events: VRButtonEvents = field(default_factory=VRButtonEvents)
 
 
@@ -72,10 +74,14 @@ class VRReceiver:
         self._init = False  # 是否已初始化
         self._btn = {"left_x": False, "left_y": False, "right_a": False, "right_b": False}
         self._btn_consumed = {"left_x": True, "left_y": True, "right_a": True, "right_b": True}
+        self._btn_times = {"left_x": 0.0, "left_y": 0.0, "right_a": 0.0, "right_b": 0.0}  # 按钮事件时间
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._callback: Optional[Callable[[VRData], None]] = None
+        self._last_tracking_state: Optional[bool] = None  # 上次追踪状态
+        self._state_change_time: float = 0.0  # 状态变更时间
+        self._state_change_callback: Optional[Callable[[bool], None]] = None  # 状态变更回调
     
     @property
     def data(self) -> VRData:
@@ -96,6 +102,7 @@ class VRReceiver:
                 right_hand=VRPose(self._data.right_hand.position.copy(), self._data.right_hand.quaternion.copy(), self._data.right_hand.gripper),
                 tracking_enabled=self._data.tracking_enabled,
                 timestamp=self._data.timestamp,
+                total_offset=self._data.total_offset,
                 button_events=events
             )
     
@@ -106,6 +113,32 @@ class VRReceiver:
     
     def set_callback(self, callback: Callable[[VRData], None]) -> None:
         self._callback = callback
+    
+    def set_state_change_callback(self, callback: Callable[[bool], None]) -> None:
+        """设置追踪状态变更回调"""
+        self._state_change_callback = callback
+    
+    @property
+    def total_offset(self) -> float:
+        """获取总偏移量(米)"""
+        with self._lock:
+            return self._data.total_offset
+    
+    @property
+    def state_just_changed(self) -> bool:
+        """状态是否刚刚变更(2秒内)"""
+        return (time.time() - self._state_change_time) < 2.0
+    
+    def get_active_button_events(self, duration: float = 1.5) -> list:
+        """获取指定时间内活跃的按钮事件列表"""
+        current_time = time.time()
+        active = []
+        names = {"left_x": "左手X", "left_y": "左手Y", "right_a": "右手A", "right_b": "右手B"}
+        with self._lock:
+            for key, name in names.items():
+                if current_time - self._btn_times[key] < duration:
+                    active.append(name)
+        return active
     
     def reset_smooth(self) -> None:
         """重置平滑状态(校准后调用)"""
@@ -135,10 +168,27 @@ class VRReceiver:
     def _parse_buttons(self, d: dict) -> None:
         """解析按键事件"""
         events = d.get("buttonEvents", {})
+        current_time = time.time()
         for unity_key, local_key in [("leftX", "left_x"), ("leftY", "left_y"), ("rightA", "right_a"), ("rightB", "right_b")]:
             if events.get(unity_key, False):
-                self._btn[local_key] = True
-                self._btn_consumed[local_key] = False
+                if current_time - self._btn_times[local_key] > 0.5:  # 防止重复触发
+                    self._btn[local_key] = True
+                    self._btn_consumed[local_key] = False
+                    self._btn_times[local_key] = current_time
+    
+    def _check_state_change(self, tracking_enabled: bool) -> bool:
+        """检查追踪状态是否变更"""
+        if self._last_tracking_state is None:
+            self._last_tracking_state = tracking_enabled
+            self._state_change_time = time.time()
+            return True
+        if tracking_enabled != self._last_tracking_state:
+            self._last_tracking_state = tracking_enabled
+            self._state_change_time = time.time()
+            if self._state_change_callback:
+                self._state_change_callback(tracking_enabled)
+            return True
+        return False
     
     def _receiver_loop(self) -> None:
         """接收线程"""
@@ -164,7 +214,9 @@ class VRReceiver:
                         self._init = True
                     self._data.tracking_enabled = d.get("trackingEnabled", False)
                     self._data.timestamp = d.get("timestamp", 0.0)
+                    self._data.total_offset = d.get("totalOffset", 0.0)
                     self._parse_buttons(d)
+                    self._check_state_change(self._data.tracking_enabled)
                 if self._callback:
                     self._callback(self.data)
             except socket.timeout:
