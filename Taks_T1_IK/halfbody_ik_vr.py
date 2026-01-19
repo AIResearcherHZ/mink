@@ -93,7 +93,7 @@ FEEDFORWARD_SCALE = 0.75
 #   - 增大 exponent → kp/kd 前半段降得更慢，越接近结束越快归零/安全值，避免“突然塌陷”
 
 RAMP_EXPONENT_EASE_OUT = 1.1  # 用于kp/kd的ramp up和position的ramp down
-RAMP_EXPONENT_EASE_IN = 0.95   # 用于kp/kd的ramp down
+RAMP_EXPONENT_EASE_IN = 0.9   # 用于kp/kd的ramp down
 
 # 安全倒向配置: 停止时主动倒向此方向
 SAFE_FALL_POSITIONS = {
