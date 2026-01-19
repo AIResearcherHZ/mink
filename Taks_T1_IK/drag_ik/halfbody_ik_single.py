@@ -170,7 +170,7 @@ if __name__ == "__main__":
     for name, (link, _) in END_EFFECTORS.items():
         if name == "waist":
             # 腰部低权重 - 大部分时间保持直立
-            task = mink.FrameTask(link, "body", position_cost=0.2, orientation_cost=0.5)
+            task = mink.FrameTask(link, "body", position_cost=0.0, orientation_cost=0.0)
         else:
             task = mink.FrameTask(link, "body", position_cost=2.0, orientation_cost=2.0)
         tasks.append(task)
