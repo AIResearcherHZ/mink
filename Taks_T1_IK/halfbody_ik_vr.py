@@ -75,19 +75,23 @@ END_EFFECTORS = {
     "right_hand": ("right_wrist_pitch_link", "right_hand_target"),
 }
 
+# COLLISION_PAIRS = [
+#     (["torso_collision"], ["left_hand_collision", "right_hand_collision"]),
+#     (["torso_collision"], ["left_elbow_collision", "right_elbow_collision"]),
+#     (["left_hand_collision"], ["right_hand_collision"]),
+#     (["left_elbow_collision"], ["right_elbow_collision"]),
+#     (["head_collision"], ["left_hand_collision", "right_hand_collision"]),
+#     (["head_collision"], ["left_elbow_collision", "right_elbow_collision"]),
+#     (["left_hand_collision"], ["right_elbow_collision"]),
+#     (["right_hand_collision"], ["left_elbow_collision"]),
+#     (["pelvis_collision"], ["left_hand_collision", "right_hand_collision"]),
+#     (["pelvis_collision"], ["left_elbow_collision", "right_elbow_collision"]),
+#     (["left_shoulder_roll_collision"], ["right_hand_collision", "right_elbow_collision"]),
+#     (["right_shoulder_roll_collision"], ["left_hand_collision", "left_elbow_collision"]),
+# ]
+
 COLLISION_PAIRS = [
-    (["torso_collision"], ["left_hand_collision", "right_hand_collision"]),
     (["torso_collision"], ["left_elbow_collision", "right_elbow_collision"]),
-    (["left_hand_collision"], ["right_hand_collision"]),
-    (["left_elbow_collision"], ["right_elbow_collision"]),
-    (["head_collision"], ["left_hand_collision", "right_hand_collision"]),
-    (["head_collision"], ["left_elbow_collision", "right_elbow_collision"]),
-    (["left_hand_collision"], ["right_elbow_collision"]),
-    (["right_hand_collision"], ["left_elbow_collision"]),
-    (["pelvis_collision"], ["left_hand_collision", "right_hand_collision"]),
-    (["pelvis_collision"], ["left_elbow_collision", "right_elbow_collision"]),
-    (["left_shoulder_roll_collision"], ["right_hand_collision", "right_elbow_collision"]),
-    (["right_shoulder_roll_collision"], ["left_hand_collision", "left_elbow_collision"]),
 ]
 
 WAIST_CONFIG = {'arm_reach': 0.55, 'deadzone': 0.10, 'compensation_gain': 1.0, 'yaw_smooth': 0.03}
@@ -339,9 +343,9 @@ class HalfBodyIKController:
         self.limits = [
             mink.ConfigurationLimit(self.model),
             mink.VelocityLimit(self.model),
-            # mink.CollisionAvoidanceLimit(self.model, COLLISION_PAIRS, gain=0.1,
-            #                              minimum_distance_from_collisions=0.05,
-            #                              collision_detection_distance=0.15)
+            mink.CollisionAvoidanceLimit(self.model, COLLISION_PAIRS, gain=0.1,
+                                         minimum_distance_from_collisions=0.05,
+                                         collision_detection_distance=0.15)
         ]
         
         self.cfg.update_from_keyframe("home")
