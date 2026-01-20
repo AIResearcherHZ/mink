@@ -90,8 +90,8 @@ COLLISION_PAIRS = [
     (["right_shoulder_roll_collision"], ["left_hand_collision", "left_elbow_collision"]),
 ]
 
-WAIST_CONFIG = {'arm_reach': 0.55, 'deadzone': 0.25, 'compensation_gain': 1.5, 'yaw_smooth': 0.03}
-ARM_BIAS_CONFIG = {'outward_bias': 0.15, 'downward_bias': 0.1, 'bias_cost': 1e-2}
+WAIST_CONFIG = {'arm_reach': 0.55, 'deadzone': 0.10, 'compensation_gain': 1.0, 'yaw_smooth': 0.03}
+ARM_BIAS_CONFIG = {'outward_bias': 0.3, 'downward_bias': 0.15, 'bias_cost': 5e-2}
 
 
 # ==================== 工具函数 ====================
@@ -164,6 +164,12 @@ class VRCalibration:
     done: bool = False
     left: np.ndarray = field(default_factory=lambda: np.zeros(3))
     right: np.ndarray = field(default_factory=lambda: np.zeros(3))
+
+@dataclass
+class MocapRateLimiter:
+    """mocap目标速度限制器，防止IK奇异点跳变"""
+    prev_pos: Dict[str, np.ndarray] = field(default_factory=dict)
+    max_speed: float = 1.5  # 最大速度 m/s
 
 @dataclass
 class RampState:
@@ -271,9 +277,9 @@ class HalfBodyIKController:
         self.limits = [
             mink.ConfigurationLimit(self.model),
             mink.VelocityLimit(self.model),
-            mink.CollisionAvoidanceLimit(self.model, COLLISION_PAIRS, gain=0.1,
-                                         minimum_distance_from_collisions=0.05,
-                                         collision_detection_distance=0.15)
+            # mink.CollisionAvoidanceLimit(self.model, COLLISION_PAIRS, gain=0.1,
+            #                              minimum_distance_from_collisions=0.05,
+            #                              collision_detection_distance=0.15)
         ]
         
         self.cfg.update_from_keyframe("home")
@@ -296,6 +302,12 @@ class HalfBodyIKController:
         self.waist_init_pos = self.data.xpos[self.model.body("base_link").id].copy()
         self.prev_neck_yaw = 0.0
         self.prev_waist_yaw = 0.0
+        self.prev_target_yaw = 0.0  # 用于YAW平滑追踪
+        
+        # mocap速度限制器
+        self.mocap_limiter = MocapRateLimiter()
+        for name, mid in self.mocap_ids.items():
+            self.mocap_limiter.prev_pos[name] = self.data.mocap_pos[mid].copy()
         
         self.ramp_state = RampState()
         self.reset_state = ResetState()
@@ -390,9 +402,27 @@ class HalfBodyIKController:
             self.reset()
         
         if self.vr_calib.done and vr_data.tracking_enabled:
-            self.data.mocap_pos[left_mid] = vr_data.left_hand.position + self.vr_calib.left
+            # 计算目标位置
+            target_left = vr_data.left_hand.position + self.vr_calib.left
+            target_right = vr_data.right_hand.position + self.vr_calib.right
+            
+            # 应用速度限制（防止快速移动导致IK奇异点跳变）
+            for name, target in [("left_hand", target_left), ("right_hand", target_right)]:
+                prev = self.mocap_limiter.prev_pos[name]
+                delta = target - prev
+                dist = float(np.linalg.norm(delta))
+                max_delta = self.mocap_limiter.max_speed * self.dt
+                if dist > max_delta:
+                    target = prev + delta * (max_delta / dist)
+                if name == "left_hand":
+                    target_left = target
+                else:
+                    target_right = target
+                self.mocap_limiter.prev_pos[name] = target.copy()
+            
+            self.data.mocap_pos[left_mid] = target_left
             self.data.mocap_quat[left_mid] = vr_data.left_hand.quaternion
-            self.data.mocap_pos[right_mid] = vr_data.right_hand.position + self.vr_calib.right
+            self.data.mocap_pos[right_mid] = target_right
             self.data.mocap_quat[right_mid] = vr_data.right_hand.quaternion
         
         # Ramp处理
@@ -420,41 +450,46 @@ class HalfBodyIKController:
         cfg_w = WAIST_CONFIG
         
         # 腰部hardcode（定义安全范围，平滑过渡避免突变）
-        # 计算双手中心到躯干的水平距离
-        hands_center_diff = hands_center - self.waist_init_pos
-        hands_center_diff[2] = 0
-        hands_center_dist = float(np.linalg.norm(hands_center_diff))
+        # 计算左右手分别到躯干的水平距离，取最大值（解决双手叠加问题）
+        left_diff = self.data.mocap_pos[left_mid] - self.waist_init_pos
+        left_diff[2] = 0
+        left_dist = float(np.linalg.norm(left_diff))
+        
+        right_diff = self.data.mocap_pos[right_mid] - self.waist_init_pos
+        right_diff[2] = 0
+        right_dist = float(np.linalg.norm(right_diff))
+        
+        # 用单手最大距离计算blend_factor，避免双手权重叠加
+        max_hand_dist = max(left_dist, right_dist)
         
         # 安全范围配置：内圈完全不动，外圈完全补偿，中间平滑过渡
-        waist_safe_zone_inner = 0.15  # 内圈：完全不动
-        waist_safe_zone_outer = 0.30  # 外圈：完全补偿
+        waist_safe_zone_inner = 0.35  # 内圈：完全不动
+        waist_safe_zone_outer = 0.50  # 外圈：完全补偿
         
         # 计算渐变系数（0=完全不动，1=完全补偿）
-        if hands_center_dist <= waist_safe_zone_inner:
+        if max_hand_dist <= waist_safe_zone_inner:
             blend_factor = 0.0
-        elif hands_center_dist >= waist_safe_zone_outer:
+        elif max_hand_dist >= waist_safe_zone_outer:
             blend_factor = 1.0
         else:
-            # 平滑过渡区间
-            blend_factor = (hands_center_dist - waist_safe_zone_inner) / (waist_safe_zone_outer - waist_safe_zone_inner)
+            blend_factor = (max_hand_dist - waist_safe_zone_inner) / (waist_safe_zone_outer - waist_safe_zone_inner)
             blend_factor = float(np.clip(blend_factor, 0.0, 1.0))
         
-        # 计算目标腰部角度
+        # YAW始终跟随双臂姿态方向（不应用blend_factor）
         target_waist_yaw = compute_waist_yaw(hands_center, self.waist_init_pos)
-        yaw_diff = target_waist_yaw - self.prev_waist_yaw
+        yaw_diff = target_waist_yaw - self.prev_target_yaw
         while yaw_diff > np.pi:
             yaw_diff -= 2 * np.pi
         while yaw_diff < -np.pi:
             yaw_diff += 2 * np.pi
-        target_yaw = self.prev_waist_yaw + yaw_diff * cfg_w['yaw_smooth']
+        waist_yaw = self.prev_target_yaw + yaw_diff * 0.15  # 平滑跟随
+        self.prev_target_yaw = waist_yaw
+        self.prev_waist_yaw = waist_yaw
         
+        # pitch只在超距时补偿，应用blend_factor
         target_pitch = compute_waist_pitch(hands_center, self.waist_init_pos, 
                                            cfg_w['arm_reach'], cfg_w['deadzone'], cfg_w['compensation_gain'])
-        
-        # 应用渐变系数
-        waist_yaw = target_yaw * blend_factor
         waist_pitch = target_pitch * blend_factor
-        self.prev_waist_yaw = waist_yaw
         
         # neck look-at（使用局部坐标系）
         head_pos = self.data.xpos[self.model.body("neck_pitch_link").id]
@@ -474,7 +509,10 @@ class HalfBodyIKController:
             if alpha >= 1.0:
                 self.reset_state.active = False
                 self.prev_waist_yaw = 0.0
-                print("[Reset] 完成")
+                self.prev_target_yaw = 0.0
+                # 清除校准状态，允许重新校准
+                self.vr_calib.done = False
+                print("[Reset] 完成，可重新校准")
         
         # IK解算
         for name, mid in self.mocap_ids.items():
