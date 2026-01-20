@@ -349,7 +349,10 @@ def main():
             kd_val = kd_target * kp_kd_scale
             mit_cmd[sdk_id] = {'q': q_target, 'dq': 0.0, 'tau': 0.0, 'kp': kp_val, 'kd': kd_val}
         if mit_cmd:
-            robot.controlMIT(mit_cmd)
+            try:
+                robot.controlMIT(mit_cmd)
+            except Exception:
+                pass  # 忽略发送错误
     
     def ramp_down():
         """安全停止: kp/kd非线性(ease_in:越来越快)从目标值降低到安全值，然后失能
@@ -360,7 +363,10 @@ def main():
         if not enable_ramp_down:
             # 直接失能
             mit_cmd = {sdk_id: {'q': 0.0, 'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0} for _, _, sdk_id in joint_info}
-            robot.controlMIT(mit_cmd)
+            try:
+                robot.controlMIT(mit_cmd)
+            except Exception:
+                pass
             print("[Ramp Down] 缓停止已禁用，直接失能")
             return
         
@@ -385,11 +391,17 @@ def main():
                 q_val = start_positions.get(sdk_id, 0.0)
                 mit_cmd[sdk_id] = {'q': q_val, 'dq': 0.0, 'tau': 0.0, 'kp': kp_val, 'kd': kd_val}
             if mit_cmd:
-                robot.controlMIT(mit_cmd)
+                try:
+                    robot.controlMIT(mit_cmd)
+                except Exception:
+                    break  # 连接断开，退出ramp down
             time.sleep(0.005)  # 200Hz
         # 到达安全kp/kd后失能
         mit_cmd = {sdk_id: {'q': start_positions.get(sdk_id, 0.0), 'dq': 0.0, 'tau': 0.0, 'kp': 0.0, 'kd': 0.0} for _, _, sdk_id in joint_info}
-        robot.controlMIT(mit_cmd)
+        try:
+            robot.controlMIT(mit_cmd)
+        except Exception:
+            pass
         print("[Ramp Down] 已降低到安全kp/kd并失能")
     
     rate = RateLimiter(frequency=50.0, warn=False)
@@ -459,8 +471,11 @@ def main():
     # 清理
     if enable_real:
         ramp_down()
-        taks.disconnect()
-        print("[TAKS] 已断开")
+        try:
+            taks.disconnect()
+            print("[TAKS] 已断开")
+        except Exception:
+            pass
     # 清理本机SDK子进程
     if sdk_proc is not None:
         print("[SDK] 关闭本机SDK服务端...")

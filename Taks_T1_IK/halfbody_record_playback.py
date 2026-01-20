@@ -146,8 +146,12 @@ class Recorder:
                 self._run_headless()
             else:
                 self._run_with_viewer()
+        except KeyboardInterrupt:
+            print("\n[录制] 用户中断")
         except Exception as e:
             print(f"[录制] 错误: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.record_data.save(self.output_path)
             self.controller.close()
@@ -207,10 +211,13 @@ class Recorder:
             
             # 发送夹爪控制命令到真机
             if self.controller.sim2real:
-                if self.left_gripper:
-                    self.left_gripper.controlMIT(percent=left_gripper, kp=2.0, kd=0.2)
-                if self.right_gripper:
-                    self.right_gripper.controlMIT(percent=right_gripper, kp=2.0, kd=0.2)
+                try:
+                    if self.left_gripper:
+                        self.left_gripper.controlMIT(percent=left_gripper, kp=1.5, kd=0.1)
+                    if self.right_gripper:
+                        self.right_gripper.controlMIT(percent=right_gripper, kp=1.5, kd=0.1)
+                except Exception:
+                    pass  # 忽略发送错误
             
             now = time.time()
             if now - last_record_time >= self.record_interval:
@@ -292,7 +299,10 @@ class Player:
                     'kp': safe_kp + (kp - safe_kp) * scale,
                     'kd': safe_kd + (kd - safe_kd) * scale
                 }
-            self.taks_client.controlMIT(mit_cmd)
+            try:
+                self.taks_client.controlMIT(mit_cmd)
+            except Exception:
+                break  # 连接断开，退出ramp up
             time.sleep(0.01)
         print("[回放] 缓启动完成")
     
@@ -314,9 +324,15 @@ class Player:
                     'kp': safe_kp + (kp - safe_kp) * scale,
                     'kd': safe_kd + (kd - safe_kd) * scale
                 }
-            self.taks_client.controlMIT(mit_cmd)
+            try:
+                self.taks_client.controlMIT(mit_cmd)
+            except Exception:
+                break  # 连接断开，退出ramp down
             time.sleep(0.01)
-        taks.disconnect()
+        try:
+            taks.disconnect()
+        except Exception:
+            pass
         print("[回放] 缓停止完成")
     
     def _send_cmd(self, mit_cmd: Dict, left_gripper: float = 0.0, right_gripper: float = 0.0):
@@ -325,13 +341,19 @@ class Player:
             return
         self.last_send_time = now
         if self.enable_real and self.taks_client:
-            self.taks_client.controlMIT(mit_cmd)
+            try:
+                self.taks_client.controlMIT(mit_cmd)
+            except Exception:
+                pass  # 忽略发送错误
         # 发送夹爪控制命令
         if self.enable_real:
-            if self.left_gripper:
-                self.left_gripper.controlMIT(percent=left_gripper, kp=2.0, kd=0.2)
-            if self.right_gripper:
-                self.right_gripper.controlMIT(percent=right_gripper, kp=2.0, kd=0.2)
+            try:
+                if self.left_gripper:
+                    self.left_gripper.controlMIT(percent=left_gripper, kp=1.5, kd=0.1)
+                if self.right_gripper:
+                    self.right_gripper.controlMIT(percent=right_gripper, kp=1.5, kd=0.1)
+            except Exception:
+                pass  # 忽略发送错误
     
     def _update_mujoco(self, mit_cmd: Dict):
         for sdk_id, cmd in mit_cmd.items():
@@ -347,24 +369,22 @@ class Player:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
         
-        print(f"[回放] 模式: {'真机+仿真' if self.enable_real else '仅仿真'}")
+        print(f"[回放] 模式: {'真机+仿真' if self.enable_real else '仅仿真'} | {'无头' if self.headless else '有头(MuJoCo)'}")
         
         try:
             first_cmd = self.record_data.frames[0].mit_cmd
             self._ramp_up(first_cmd)
             
-            with mujoco.viewer.launch_passive(self.model, self.data,
-                                              show_left_ui=False, show_right_ui=False) as viewer:
-                mujoco.mjv_defaultFreeCamera(self.model, viewer.cam)
-                
+            if self.headless:
+                # 无头模式：不启动viewer
                 loop_count = 0
-                while self.running and viewer.is_running():
+                while self.running:
                     loop_count += 1
                     print(f"[回放] 第 {loop_count} 次播放")
                     
                     play_start = time.time()
                     for frame in self.record_data.frames:
-                        if not self.running or not viewer.is_running():
+                        if not self.running:
                             break
                         
                         target_time = play_start + frame.timestamp
@@ -373,14 +393,42 @@ class Player:
                         
                         self._send_cmd(frame.mit_cmd, frame.left_gripper, frame.right_gripper)
                         self._update_mujoco(frame.mit_cmd)
-                        viewer.sync()
                     
                     if not self.loop:
                         break
+            else:
+                # 有头模式：启动viewer
+                with mujoco.viewer.launch_passive(self.model, self.data,
+                                                  show_left_ui=False, show_right_ui=False) as viewer:
+                    mujoco.mjv_defaultFreeCamera(self.model, viewer.cam)
+                    
+                    loop_count = 0
+                    while self.running and viewer.is_running():
+                        loop_count += 1
+                        print(f"[回放] 第 {loop_count} 次播放")
+                        
+                        play_start = time.time()
+                        for frame in self.record_data.frames:
+                            if not self.running or not viewer.is_running():
+                                break
+                            
+                            target_time = play_start + frame.timestamp
+                            while time.time() < target_time and self.running:
+                                time.sleep(0.001)
+                            
+                            self._send_cmd(frame.mit_cmd, frame.left_gripper, frame.right_gripper)
+                            self._update_mujoco(frame.mit_cmd)
+                            viewer.sync()
+                        
+                        if not self.loop:
+                            break
         finally:
             self._ramp_down()
             if self.taks_client:
-                taks.disconnect()
+                try:
+                    taks.disconnect()
+                except Exception:
+                    pass
 
 
 # ==================== 主程序 ====================

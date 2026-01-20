@@ -60,12 +60,12 @@ COLLISION_PAIRS = [
 WAIST_CONFIG = {
     'arm_reach': 0.55,
     'deadzone': 0.15,
-    'compensation_gain': 0.95,
+    'compensation_gain': 1.2,
     'yaw_smooth': 0.03,
 }
 
 # 手臂偏置配置
-ARM_BIAS_CONFIG = {'outward_bias': 0.3, 'downward_bias': 0.15, 'bias_cost': 5e-2}
+ARM_BIAS_CONFIG = {'outward_bias': 0.35, 'downward_bias': 0.2, 'bias_cost': 1e-1}
 
 
 # ==================== 工具函数 ====================
@@ -101,12 +101,37 @@ def compute_waist_yaw(hands_center: np.ndarray, waist_pos: np.ndarray,
 
 
 def compute_waist_compensation(forward_dist: float, arm_reach: float, deadzone: float, gain: float) -> float:
-    """计算腰部pitch补偿，使用单手最大前伸距离"""
-    threshold = arm_reach - deadzone
-    if forward_dist <= threshold:
-        return 0.0
-    excess = forward_dist - threshold
-    return float(np.clip(excess * gain, -0.3, 0.3))
+    """计算腰部pitch补偿，使用单手最大前伸距离（正值前倾，负值后仰）"""
+    # 前向补偿：超过arm_reach-deadzone才开始
+    forward_threshold = arm_reach - deadzone
+    # 后向补偿：降低阈值，更早触发
+    backward_threshold = 0.1
+    
+    if forward_dist > 0:
+        # 前倾补偿
+        if forward_dist <= forward_threshold:
+            return 0.0
+        excess = forward_dist - forward_threshold
+        return float(np.clip(excess * gain, 0.0, 0.4))
+    else:
+        # 后仰补偿（手往后背时）
+        backward_dist = -forward_dist
+        if backward_dist <= backward_threshold:
+            return 0.0
+        excess = backward_dist - backward_threshold
+        # 增强后仰补偿，使用与前倾相同的gain
+        return float(np.clip(-excess * gain * 0.8, -0.35, 0.0))
+
+
+def compute_local_forward_dist(hand_pos: np.ndarray, waist_pos: np.ndarray, waist_yaw: float) -> float:
+    """计算手在腰部局部坐标系下的前向距离（考虑yaw旋转）"""
+    diff = hand_pos - waist_pos
+    diff[2] = 0
+    # 将世界坐标系的diff旋转到腰部局部坐标系
+    cos_yaw = np.cos(-waist_yaw)
+    sin_yaw = np.sin(-waist_yaw)
+    local_x = diff[0] * cos_yaw - diff[1] * sin_yaw
+    return float(local_x)
 
 
 def compute_neck_angles(head_pos: np.ndarray, target_pos: np.ndarray, prev_yaw: float, prev_pitch: float, 
@@ -261,21 +286,17 @@ if __name__ == "__main__":
             hands_center = (data.mocap_pos[left_mid] + data.mocap_pos[right_mid]) / 2.0
             cfg_w = WAIST_CONFIG
             
-            # 计算左右手分别到躯干的水平距离和前向距离
+            # 计算左右手分别到躯干的水平距离
             left_diff = data.mocap_pos[left_mid] - waist_init_pos
             left_diff[2] = 0
             left_dist = float(np.linalg.norm(left_diff))
-            left_forward = float(left_diff[0])  # X轴前向距离
             
             right_diff = data.mocap_pos[right_mid] - waist_init_pos
             right_diff[2] = 0
             right_dist = float(np.linalg.norm(right_diff))
-            right_forward = float(right_diff[0])  # X轴前向距离
             
             # 用单手最大距离计算blend_factor（不叠加，避免双手权重叠加）
             max_hand_dist = max(left_dist, right_dist)
-            # 单手最大前向距离（不叠加，只取最大值，避免双手同时伸出时权重叠加）
-            max_forward_dist = max(left_forward, right_forward, 0.0)
             
             # 安全范围配置
             waist_safe_zone_inner = 0.15
@@ -290,7 +311,7 @@ if __name__ == "__main__":
                 blend_factor = (max_hand_dist - waist_safe_zone_inner) / (waist_safe_zone_outer - waist_safe_zone_inner)
                 blend_factor = float(np.clip(blend_factor, 0.0, 1.0))
             
-            # YAW内外圈逻辑：内圈保持0位，外圈跟随，过渡区平滑插值
+            # 先计算YAW（用于后续局部坐标系计算）
             target_waist_yaw = compute_waist_yaw(hands_center, waist_init_pos, 
                                                  inner_radius=waist_safe_zone_inner, 
                                                  outer_radius=waist_safe_zone_outer)
@@ -300,9 +321,29 @@ if __name__ == "__main__":
             while yaw_diff < -np.pi:
                 yaw_diff += 2 * np.pi
             waist_yaw = prev_waist_yaw + yaw_diff * 0.15
-            prev_waist_yaw = waist_yaw
             
-            # pitch补偿：使用单手最大前向距离
+            # 用世界坐标系判断是否在身后（用于禁用yaw）
+            left_forward_world = compute_local_forward_dist(data.mocap_pos[left_mid], waist_init_pos, 0.0)
+            right_forward_world = compute_local_forward_dist(data.mocap_pos[right_mid], waist_init_pos, 0.0)
+            is_backward = (left_forward_world < -0.2 and right_forward_world < -0.2)
+            
+            if is_backward:
+                # 后仰模式：禁用yaw跟随，保持0位
+                waist_yaw = 0.0
+                prev_waist_yaw = 0.0
+            else:
+                # 正常模式：应用计算的yaw
+                prev_waist_yaw = waist_yaw
+            
+            # 用当前yaw的局部坐标系计算前向距离（用于pitch补偿）
+            left_forward = compute_local_forward_dist(data.mocap_pos[left_mid], waist_init_pos, waist_yaw)
+            right_forward = compute_local_forward_dist(data.mocap_pos[right_mid], waist_init_pos, waist_yaw)
+            if abs(left_forward) > abs(right_forward):
+                max_forward_dist = left_forward
+            else:
+                max_forward_dist = right_forward
+            
+            # pitch补偿：使用局部坐标系前向距离
             target_pitch = compute_waist_compensation(max_forward_dist, cfg_w['arm_reach'], 
                                                       cfg_w['deadzone'], cfg_w['compensation_gain'])
             waist_pitch = target_pitch * blend_factor
@@ -341,7 +382,7 @@ if __name__ == "__main__":
             
             constraints = [mink.DofFreezingTask(model, dof_indices=neck_dof + waist_dof)]
             try:
-                vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=5e-2, limits=limits, constraints=constraints)
+                vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=2e-1, limits=limits, constraints=constraints)
             except mink.exceptions.NoSolutionFound:
                 vel = mink.solve_ik(cfg, tasks, dt, "daqp", damping=0.5, limits=limits, constraints=[])
             cfg.integrate_inplace(vel, dt)
