@@ -47,8 +47,8 @@ COLLISION_PAIRS = [
 # 腰部配置
 WAIST_CONFIG = {
     'arm_reach': 0.55,
-    'deadzone': 0.15,
-    'compensation_gain': 1.2,  # 增强补偿系数
+    'deadzone': 0.10,
+    'compensation_gain': 1.0,  # 增强补偿系数
     'yaw_smooth': 0.03,
 }
 

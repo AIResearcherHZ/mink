@@ -90,7 +90,7 @@ COLLISION_PAIRS = [
     (["right_shoulder_roll_collision"], ["left_hand_collision", "left_elbow_collision"]),
 ]
 
-WAIST_CONFIG = {'arm_reach': 0.55, 'deadzone': 0.15, 'compensation_gain': 1.2, 'yaw_smooth': 0.03}
+WAIST_CONFIG = {'arm_reach': 0.55, 'deadzone': 0.10, 'compensation_gain': 1.0, 'yaw_smooth': 0.03}
 # 手臂偏置配置（增加权重减少奇异点卡顿）
 ARM_BIAS_CONFIG = {'outward_bias': 0.35, 'downward_bias': 0.2, 'bias_cost': 1e-1}
 
