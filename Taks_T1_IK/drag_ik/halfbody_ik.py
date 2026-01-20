@@ -29,26 +29,26 @@ END_EFFECTORS = {
 }
 
 # 碰撞对
-# COLLISION_PAIRS = [
-#     (["torso_collision"], ["left_hand_collision", "right_hand_collision"]),
-#     (["torso_collision"], ["left_elbow_collision", "right_elbow_collision"]),
-#     (["left_hand_collision"], ["right_hand_collision"]),
-#     (["left_elbow_collision"], ["right_elbow_collision"]),
-#     (["head_collision"], ["left_hand_collision", "right_hand_collision"]),
-#     (["head_collision"], ["left_elbow_collision", "right_elbow_collision"]),
-#     (["left_hand_collision"], ["right_elbow_collision"]),
-#     (["right_hand_collision"], ["left_elbow_collision"]),
-#     (["pelvis_collision"], ["left_hand_collision", "right_hand_collision"]),
-#     (["pelvis_collision"], ["left_elbow_collision", "right_elbow_collision"]),
-#     (["left_shoulder_roll_collision"], ["right_hand_collision", "right_elbow_collision"]),
-#     (["right_shoulder_roll_collision"], ["left_hand_collision", "left_elbow_collision"]),
-# ]
+COLLISION_PAIRS = [
+    (["torso_collision"], ["left_hand_collision", "right_hand_collision"]),
+    (["torso_collision"], ["left_elbow_collision", "right_elbow_collision"]),
+    (["left_hand_collision"], ["right_hand_collision"]),
+    (["left_elbow_collision"], ["right_elbow_collision"]),
+    (["head_collision"], ["left_hand_collision", "right_hand_collision"]),
+    (["head_collision"], ["left_elbow_collision", "right_elbow_collision"]),
+    (["left_hand_collision"], ["right_elbow_collision"]),
+    (["right_hand_collision"], ["left_elbow_collision"]),
+    (["pelvis_collision"], ["left_hand_collision", "right_hand_collision"]),
+    (["pelvis_collision"], ["left_elbow_collision", "right_elbow_collision"]),
+    (["left_shoulder_roll_collision"], ["right_hand_collision", "right_elbow_collision"]),
+    (["right_shoulder_roll_collision"], ["left_hand_collision", "left_elbow_collision"]),
+]
 
 # 腰部配置
 WAIST_CONFIG = {
     'arm_reach': 0.55,
-    'deadzone': 0.25,
-    'compensation_gain': 1.5,
+    'deadzone': 0.10,
+    'compensation_gain': 1.0,
     'yaw_smooth': 0.03,
 }
 
