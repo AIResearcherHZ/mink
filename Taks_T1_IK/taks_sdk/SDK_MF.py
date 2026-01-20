@@ -18,8 +18,8 @@ from collections import deque
 import pyarrow as pa
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from DM_CAN_FD import Motor as DM_Motor, MotorControlFD as DM_MotorControl, DM_Motor_Type, Control_Type
-from DM_IMU import DM_IMU
+from libs.drivers.DM_CAN_FD import Motor as DM_Motor, MotorControlFD as DM_MotorControl, DM_Motor_Type, Control_Type
+from libs.drivers.DM_IMU import DM_IMU
 
 # ==================== 序列化 ====================
 

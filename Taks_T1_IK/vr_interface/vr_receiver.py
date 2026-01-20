@@ -14,7 +14,6 @@ from typing import Optional, Callable
 UDP_IP = "0.0.0.0"
 UDP_PORT = 7000
 BUFFER_SIZE = 4096
-EMA_ALPHA = 0.9  # EMA平滑系数(0.3-0.5平滑, 0.6-0.8快速响应)
 
 
 @dataclass
@@ -146,7 +145,7 @@ class VRReceiver:
             self._init = False
     
     def _parse_pose(self, d: dict, pose: VRPose) -> None:
-        """解析并平滑位姿"""
+        """解析位姿（直接使用原始数据，无平滑）"""
         if "position" not in d:
             return
         pos = np.array(d["position"], dtype=np.float64)
@@ -155,15 +154,9 @@ class VRReceiver:
             quat = unity_to_mujoco_quat(quat)
         grip = float(d.get("gripper", 0.0))
         
-        # 首次初始化
-        if not self._init:
-            pose.position, pose.quaternion, pose.gripper = pos.copy(), quat.copy(), grip
-            return
-        
-        # EMA平滑
-        pose.position = EMA_ALPHA * pos + (1 - EMA_ALPHA) * pose.position
-        pose.quaternion = slerp(pose.quaternion, quat, EMA_ALPHA)
-        pose.gripper = EMA_ALPHA * grip + (1 - EMA_ALPHA) * pose.gripper
+        pose.position = pos.copy()
+        pose.quaternion = quat.copy()
+        pose.gripper = grip
     
     def _parse_buttons(self, d: dict) -> None:
         """解析按键事件"""

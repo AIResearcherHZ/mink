@@ -10,14 +10,12 @@ import signal
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 import mujoco
 import mujoco.viewer
-from loop_rate_limiters import RateLimiter
 from rich.console import Console
-from rich.table import Table
 
 sys.path.insert(0, str(Path(__file__).parent))
 from halfbody_ik_vr import (
@@ -117,6 +115,10 @@ class Recorder:
         self.shutdown_requested = False
         self.console = Console()
         
+        # 夹爪控制器（复用controller中的夹爪对象）
+        self.left_gripper = self.controller.left_gripper
+        self.right_gripper = self.controller.right_gripper
+        
         # 禁用控制器的缓启动/停止(录制时不需要)
         self.controller.enable_ramp_up = False
         self.controller.enable_ramp_down = False
@@ -203,6 +205,13 @@ class Recorder:
             left_gripper = vr_data.left_hand.gripper * 100.0
             right_gripper = vr_data.right_hand.gripper * 100.0
             
+            # 发送夹爪控制命令到真机
+            if self.controller.sim2real:
+                if self.left_gripper:
+                    self.left_gripper.controlMIT(percent=left_gripper, kp=2.0, kd=0.2)
+                if self.right_gripper:
+                    self.right_gripper.controlMIT(percent=right_gripper, kp=2.0, kd=0.2)
+            
             now = time.time()
             if now - last_record_time >= self.record_interval:
                 self.record_data.add_frame(mit_cmd, left_gripper, right_gripper)
@@ -254,8 +263,13 @@ class Player:
                 pass
         
         self.taks_client = None
+        self.left_gripper = None
+        self.right_gripper = None
         if enable_real:
-            self.taks_client = taks.TaksClient(device="Taks-T1-semibody")
+            taks.connect(address=host, cmd_port=port, wait_data=True, timeout=2.0)
+            self.taks_client = taks.register(device_type="Taks-T1-semibody")
+            self.left_gripper = taks.register(device_type="Taks-T1-leftgripper")
+            self.right_gripper = taks.register(device_type="Taks-T1-rightgripper")
         
         self.last_send_time = 0.0
         self.send_interval = 1.0 / TAKS_SEND_RATE
@@ -264,8 +278,6 @@ class Player:
         if not self.enable_ramp_up or not self.enable_real or not self.taks_client:
             return
         print(f"[回放] 缓启动 ({self.ramp_up_time}s)...")
-        self.taks_client.register()
-        time.sleep(0.5)
         
         start = time.time()
         while time.time() - start < self.ramp_up_time and self.running:
@@ -280,7 +292,7 @@ class Player:
                     'kp': safe_kp + (kp - safe_kp) * scale,
                     'kd': safe_kd + (kd - safe_kd) * scale
                 }
-            self.taks_client.mit(mit_cmd)
+            self.taks_client.controlMIT(mit_cmd)
             time.sleep(0.01)
         print("[回放] 缓启动完成")
     
@@ -302,18 +314,24 @@ class Player:
                     'kp': safe_kp + (kp - safe_kp) * scale,
                     'kd': safe_kd + (kd - safe_kd) * scale
                 }
-            self.taks_client.mit(mit_cmd)
+            self.taks_client.controlMIT(mit_cmd)
             time.sleep(0.01)
-        self.taks_client.disable_all()
+        taks.disconnect()
         print("[回放] 缓停止完成")
     
-    def _send_cmd(self, mit_cmd: Dict):
+    def _send_cmd(self, mit_cmd: Dict, left_gripper: float = 0.0, right_gripper: float = 0.0):
         now = time.time()
         if now - self.last_send_time < self.send_interval:
             return
         self.last_send_time = now
         if self.enable_real and self.taks_client:
-            self.taks_client.mit(mit_cmd)
+            self.taks_client.controlMIT(mit_cmd)
+        # 发送夹爪控制命令
+        if self.enable_real:
+            if self.left_gripper:
+                self.left_gripper.controlMIT(percent=left_gripper, kp=2.0, kd=0.2)
+            if self.right_gripper:
+                self.right_gripper.controlMIT(percent=right_gripper, kp=2.0, kd=0.2)
     
     def _update_mujoco(self, mit_cmd: Dict):
         for sdk_id, cmd in mit_cmd.items():
@@ -353,7 +371,7 @@ class Player:
                         while time.time() < target_time and self.running:
                             time.sleep(0.001)
                         
-                        self._send_cmd(frame.mit_cmd)
+                        self._send_cmd(frame.mit_cmd, frame.left_gripper, frame.right_gripper)
                         self._update_mujoco(frame.mit_cmd)
                         viewer.sync()
                     
@@ -362,7 +380,7 @@ class Player:
         finally:
             self._ramp_down()
             if self.taks_client:
-                self.taks_client.close()
+                taks.disconnect()
 
 
 # ==================== 主程序 ====================
@@ -372,7 +390,7 @@ def main():
     subparsers = parser.add_subparsers(dest="mode", help="模式(默认record)")
     
     # 公共参数
-    parser.add_argument("--host", type=str, default="192.168.5.4", help="taks服务器地址")
+    parser.add_argument("--host", type=str, default="192.168.5.16", help="taks服务器地址")
     parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
     parser.add_argument("--no-real", action="store_true", default=False, help="禁用真机控制(仅仿真)")
     parser.add_argument("--headless", action="store_true", default=False, help="无头模式(无GUI)")

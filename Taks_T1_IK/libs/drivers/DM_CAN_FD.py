@@ -14,7 +14,7 @@ from enum import IntEnum
 from struct import unpack, pack
 import can
 import threading
-from ankle_kinematics import (
+from libs.drivers.ankle_kinematics import (
     ankle_ik,
     ankle_fk,
     motor_vel_to_ankle_vel,
@@ -735,7 +735,7 @@ class MotorControlFD:
                 # float类型
                 num = uint8s_to_float(data[4], data[5], data[6], data[7])
                 self.motors_map[masterid].temp_param_dict[RID] = num
-            print(f"[DEBUG] 参数回复: CANID={hex(CANID)}, SlaveID={slaveId}, RID={RID}, 值={num}, 原始数据={data.hex()}")
+            # print(f"[DEBUG] 参数回复: CANID={hex(CANID)}, SlaveID={slaveId}, RID={RID}, 值={num}, 原始数据={data.hex()}")
 
     def addMotor(self, Motor):
         """

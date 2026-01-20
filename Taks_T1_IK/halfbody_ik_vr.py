@@ -111,19 +111,27 @@ def slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
     theta = np.arccos(dot)
     return (np.sin((1 - t) * theta) * q0 + np.sin(t * theta) * q1) / np.sin(theta)
 
-def compute_waist_yaw(hands_center: np.ndarray, waist_pos: np.ndarray) -> float:
+def compute_waist_yaw(hands_center: np.ndarray, waist_pos: np.ndarray, 
+                      safe_radius: float = 0.35, prev_yaw: float = 0.0) -> float:
+    """计算腰部yaw，内外圈逻辑：安全范围内完全不动"""
     diff = hands_center - waist_pos
-    return float(np.arctan2(diff[1], diff[0]))
-
-def compute_waist_pitch(hands_center: np.ndarray, waist_pos: np.ndarray,
-                        arm_reach: float, deadzone: float, gain: float) -> float:
-    diff = hands_center - waist_pos
-    diff[2] = 0
+    diff[2] = 0  # 只考虑水平面
     dist = float(np.linalg.norm(diff))
+    
+    # 内圈：完全不动，保持上次yaw
+    if dist <= safe_radius:
+        return prev_yaw
+    
+    # 外圈：跟随手的方向
+    target_yaw = float(np.arctan2(diff[1], diff[0]))
+    return target_yaw
+
+def compute_waist_pitch(forward_dist: float, arm_reach: float, deadzone: float, gain: float) -> float:
+    """计算腰部pitch补偿，使用单手最大前伸距离"""
     threshold = arm_reach - deadzone
-    if dist <= threshold:
+    if forward_dist <= threshold:
         return 0.0
-    excess = dist - threshold
+    excess = forward_dist - threshold
     return float(np.clip(excess * gain, -0.3, 0.3))
 
 def compute_neck_angles(head_pos: np.ndarray, target_pos: np.ndarray, prev_yaw: float, waist_yaw: float = 0.0) -> tuple:
@@ -169,7 +177,7 @@ class VRCalibration:
 class MocapRateLimiter:
     """mocap目标速度限制器，防止IK奇异点跳变"""
     prev_pos: Dict[str, np.ndarray] = field(default_factory=dict)
-    max_speed: float = 1.5  # 最大速度 m/s
+    max_speed: float = 2.0  # 最大速度 m/s
 
 @dataclass
 class RampState:
@@ -220,10 +228,15 @@ class HalfBodyIKController:
         # SDK
         self.sdk_proc = None
         self.taks_client = None
+        self.left_gripper = None
+        self.right_gripper = None
         if sim2real:
-            if auto_start_sdk:
+            if auto_start_sdk and host in ("localhost", "127.0.0.1"):
                 self.sdk_proc = self._start_sdk_server()
-            self.taks_client = taks.TaksClient(device="Taks-T1-semibody")
+            taks.connect(address=host, cmd_port=port, wait_data=True, timeout=5.0)
+            self.taks_client = taks.register(device_type="Taks-T1-semibody")
+            self.left_gripper = taks.register(device_type="Taks-T1-leftgripper")
+            self.right_gripper = taks.register(device_type="Taks-T1-rightgripper")
         
         self.rate = RateLimiter(frequency=100.0, warn=False)
         self.dt = self.rate.dt
@@ -350,9 +363,6 @@ class HalfBodyIKController:
         print("[Reset] 开始复位...")
     
     def start_ramp_up(self):
-        if self.sim2real and self.taks_client:
-            self.taks_client.register()
-            time.sleep(0.5)
         self.ramp_state = RampState(active=True, direction="up", start_time=time.time(), progress=0.0)
         print("[Ramp Up] 启动...")
     
@@ -389,19 +399,30 @@ class HalfBodyIKController:
         if now - self.last_send_time < self.send_interval:
             return
         self.last_send_time = now
-        self.taks_client.mit(mit_cmd)
+        self.taks_client.controlMIT(mit_cmd)
+    
+    def send_gripper_cmd(self, left_percent: float, right_percent: float):
+        """发送夹爪控制命令"""
+        if not self.sim2real:
+            return
+        if self.left_gripper:
+            self.left_gripper.controlMIT(percent=left_percent, kp=2.0, kd=0.2)
+        if self.right_gripper:
+            self.right_gripper.controlMIT(percent=right_percent, kp=2.0, kd=0.2)
     
     def step(self) -> Dict:
         # VR输入
         vr_data = self.vr.data
         left_mid, right_mid = self.mocap_ids["left_hand"], self.mocap_ids["right_hand"]
         
+        # VR按钮事件处理
         if vr_data.button_events.right_b:
             self.calibrate()
         if vr_data.button_events.right_a:
             self.reset()
         
-        if self.vr_calib.done and vr_data.tracking_enabled:
+        # 无论tracking状态如何，只要校准完成就处理VR数据
+        if self.vr_calib.done:
             # 计算目标位置
             target_left = vr_data.left_hand.position + self.vr_calib.left
             target_right = vr_data.right_hand.position + self.vr_calib.right
@@ -441,32 +462,35 @@ class HalfBodyIKController:
                     self.ramp_state.progress = 0.0
                     print("[Ramp Down] 完成")
                     if self.sim2real and self.taks_client:
-                        self.taks_client.disable_all()
+                        taks.disconnect()
                 else:
                     self.ramp_state.progress = 1.0 - elapsed / RAMP_DOWN_TIME
         
-        # 双手中心
+        # 双手中心（用于yaw跟随）
         hands_center = (self.data.mocap_pos[left_mid] + self.data.mocap_pos[right_mid]) / 2.0
         cfg_w = WAIST_CONFIG
         
-        # 腰部hardcode（定义安全范围，平滑过渡避免突变）
-        # 计算左右手分别到躯干的水平距离，取最大值（解决双手叠加问题）
+        # 计算左右手分别到躯干的水平距离和前向距离
         left_diff = self.data.mocap_pos[left_mid] - self.waist_init_pos
         left_diff[2] = 0
         left_dist = float(np.linalg.norm(left_diff))
+        left_forward = float(left_diff[0])  # X轴前向距离
         
         right_diff = self.data.mocap_pos[right_mid] - self.waist_init_pos
         right_diff[2] = 0
         right_dist = float(np.linalg.norm(right_diff))
+        right_forward = float(right_diff[0])  # X轴前向距离
         
-        # 用单手最大距离计算blend_factor，避免双手权重叠加
+        # 用单手最大距离计算blend_factor（不叠加，避免双手权重叠加）
         max_hand_dist = max(left_dist, right_dist)
+        # 单手最大前向距离（不叠加，只取最大值，避免双手同时伸出时权重叠加）
+        max_forward_dist = max(left_forward, right_forward, 0.0)
         
-        # 安全范围配置：内圈完全不动，外圈完全补偿，中间平滑过渡
-        waist_safe_zone_inner = 0.35  # 内圈：完全不动
-        waist_safe_zone_outer = 0.50  # 外圈：完全补偿
+        # 安全范围配置：内圈完全不动，外圈完全补偿
+        waist_safe_zone_inner = 0.35
+        waist_safe_zone_outer = 0.50
         
-        # 计算渐变系数（0=完全不动，1=完全补偿）
+        # 计算blend_factor（基于单手最大距离）
         if max_hand_dist <= waist_safe_zone_inner:
             blend_factor = 0.0
         elif max_hand_dist >= waist_safe_zone_outer:
@@ -475,20 +499,22 @@ class HalfBodyIKController:
             blend_factor = (max_hand_dist - waist_safe_zone_inner) / (waist_safe_zone_outer - waist_safe_zone_inner)
             blend_factor = float(np.clip(blend_factor, 0.0, 1.0))
         
-        # YAW始终跟随双臂姿态方向（不应用blend_factor）
-        target_waist_yaw = compute_waist_yaw(hands_center, self.waist_init_pos)
-        yaw_diff = target_waist_yaw - self.prev_target_yaw
+        # YAW内外圈逻辑：安全范围内完全不动，超出范围才跟随
+        target_waist_yaw = compute_waist_yaw(hands_center, self.waist_init_pos, 
+                                             safe_radius=waist_safe_zone_inner, 
+                                             prev_yaw=self.prev_waist_yaw)
+        # 平滑过渡
+        yaw_diff = target_waist_yaw - self.prev_waist_yaw
         while yaw_diff > np.pi:
             yaw_diff -= 2 * np.pi
         while yaw_diff < -np.pi:
             yaw_diff += 2 * np.pi
-        waist_yaw = self.prev_target_yaw + yaw_diff * 0.15  # 平滑跟随
-        self.prev_target_yaw = waist_yaw
+        waist_yaw = self.prev_waist_yaw + yaw_diff * 0.15
         self.prev_waist_yaw = waist_yaw
         
-        # pitch只在超距时补偿，应用blend_factor
-        target_pitch = compute_waist_pitch(hands_center, self.waist_init_pos, 
-                                           cfg_w['arm_reach'], cfg_w['deadzone'], cfg_w['compensation_gain'])
+        # pitch补偿：使用单手最大前向距离（单手前伸也会弯腰）
+        target_pitch = compute_waist_pitch(max_forward_dist, cfg_w['arm_reach'], 
+                                           cfg_w['deadzone'], cfg_w['compensation_gain'])
         waist_pitch = target_pitch * blend_factor
         
         # neck look-at（使用局部坐标系）
@@ -518,12 +544,13 @@ class HalfBodyIKController:
         for name, mid in self.mocap_ids.items():
             self.ee_tasks[name].set_target(mink.SE3.from_mocap_id(self.data, mid))
         
+        # IK解算（增加damping提高稳定性，减少胸前卡顿）
         constraints = [mink.DofFreezingTask(self.model, dof_indices=self.neck_dof + self.waist_dof)]
         try:
-            vel = mink.solve_ik(self.cfg, self.tasks, self.dt, "daqp", damping=1e-1, 
+            vel = mink.solve_ik(self.cfg, self.tasks, self.dt, "daqp", damping=5e-2, 
                                limits=self.limits, constraints=constraints)
         except mink.exceptions.NoSolutionFound:
-            vel = mink.solve_ik(self.cfg, self.tasks, self.dt, "daqp", damping=1.0, 
+            vel = mink.solve_ik(self.cfg, self.tasks, self.dt, "daqp", damping=0.5, 
                                limits=self.limits, constraints=[])
         self.cfg.integrate_inplace(vel, self.dt)
         
@@ -545,6 +572,11 @@ class HalfBodyIKController:
         mit_cmd = self.build_mit_cmd(self.cfg.q, self.data.qfrc_bias, self.ramp_state.progress)
         self.last_mit_cmd = mit_cmd
         self.send_to_real(mit_cmd)
+        
+        # 夹爪控制（VR扳机）
+        left_gripper_percent = vr_data.left_hand.gripper * 100.0
+        right_gripper_percent = vr_data.right_hand.gripper * 100.0
+        self.send_gripper_cmd(left_gripper_percent, right_gripper_percent)
         
         return mit_cmd
     
@@ -577,7 +609,7 @@ class HalfBodyIKController:
                 time.sleep(0.01)
         self.vr.stop()
         if self.taks_client:
-            self.taks_client.close()
+            taks.disconnect()
         if self.sdk_proc:
             self.sdk_proc.terminate()
             self.sdk_proc.wait(timeout=2)
@@ -589,7 +621,7 @@ class HalfBodyIKController:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="半身VR控制IK - SIM2REAL")
     parser.add_argument("--headless", action="store_true", default=False, help="无头模式")
-    parser.add_argument("--host", type=str, default="192.168.5.4", help="taks服务器地址")
+    parser.add_argument("--host", type=str, default="192.168.5.16", help="taks服务器地址")
     parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
     parser.add_argument("--no-real", action="store_true", default=True, help="禁用真机控制")
     parser.add_argument("--no-ramp-up", action="store_true", default=True, help="禁用缓启动")

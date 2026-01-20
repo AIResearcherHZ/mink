@@ -11,11 +11,8 @@ pip install rich python-can
 
 import sys
 import time
-import threading
 import os
-from pathlib import Path
 from collections import deque
-from datetime import datetime
 
 # 添加驱动路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -23,9 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 try:
     from rich.console import Console
     from rich.table import Table
-    from rich.live import Live
     from rich.panel import Panel
-    from rich.text import Text
 except ImportError:
     print("请先安装 rich 库: pip install rich")
     exit(1)
