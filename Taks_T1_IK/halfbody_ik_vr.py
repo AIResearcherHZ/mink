@@ -90,7 +90,7 @@ COLLISION_PAIRS = [
     (["right_shoulder_roll_collision"], ["left_hand_collision", "left_elbow_collision"]),
 ]
 
-WAIST_CONFIG = {'arm_reach': 0.55, 'deadzone': 0.10, 'compensation_gain': 1.0, 'yaw_smooth': 0.03}
+WAIST_CONFIG = {'arm_reach': 0.55, 'deadzone': 0.15, 'compensation_gain': 0.95, 'yaw_smooth': 0.03}
 ARM_BIAS_CONFIG = {'outward_bias': 0.3, 'downward_bias': 0.15, 'bias_cost': 5e-2}
 
 
@@ -112,19 +112,26 @@ def slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
     return (np.sin((1 - t) * theta) * q0 + np.sin(t * theta) * q1) / np.sin(theta)
 
 def compute_waist_yaw(hands_center: np.ndarray, waist_pos: np.ndarray, 
-                      safe_radius: float = 0.35, prev_yaw: float = 0.0) -> float:
-    """计算腰部yaw，内外圈逻辑：安全范围内完全不动"""
+                      inner_radius: float = 0.20, outer_radius: float = 0.40) -> float:
+    """计算腰部yaw，内外圈逻辑：内圈保持0位，外圈跟随目标，过渡区平滑插值"""
     diff = hands_center - waist_pos
     diff[2] = 0  # 只考虑水平面
     dist = float(np.linalg.norm(diff))
     
-    # 内圈：完全不动，保持上次yaw
-    if dist <= safe_radius:
-        return prev_yaw
+    # 内圈：保持0位
+    if dist <= inner_radius:
+        return 0.0
     
-    # 外圈：跟随手的方向
+    # 计算目标yaw
     target_yaw = float(np.arctan2(diff[1], diff[0]))
-    return target_yaw
+    
+    # 外圈：完全跟随
+    if dist >= outer_radius:
+        return target_yaw
+    
+    # 过渡区：线性插值
+    blend = (dist - inner_radius) / (outer_radius - inner_radius)
+    return target_yaw * blend
 
 def compute_waist_pitch(forward_dist: float, arm_reach: float, deadzone: float, gain: float) -> float:
     """计算腰部pitch补偿，使用单手最大前伸距离"""
@@ -134,34 +141,55 @@ def compute_waist_pitch(forward_dist: float, arm_reach: float, deadzone: float, 
     excess = forward_dist - threshold
     return float(np.clip(excess * gain, -0.3, 0.3))
 
-def compute_neck_angles(head_pos: np.ndarray, target_pos: np.ndarray, prev_yaw: float, waist_yaw: float = 0.0) -> tuple:
-    """计算neck关节角度（yaw, pitch），相对于躯干局部坐标系"""
+def compute_neck_angles(head_pos: np.ndarray, target_pos: np.ndarray, prev_yaw: float, prev_pitch: float, 
+                        waist_yaw: float = 0.0, inner_radius: float = 0.3, outer_radius: float = 0.6) -> tuple:
+    """计算neck关节角度（yaw, pitch），内外圈逻辑：内圈保持0位，外圈跟随目标"""
     direction = target_pos - head_pos
     dist = float(np.linalg.norm(direction))
     if dist < 1e-6:
-        return prev_yaw, 0.0
+        return prev_yaw, prev_pitch
     direction /= dist
-    # 世界坐标系下的yaw
-    world_yaw = float(np.arctan2(direction[1], direction[0]))
-    # 转换为相对于躯干的局部yaw（减去腰部yaw）
-    raw_yaw = world_yaw - waist_yaw
-    # 归一化到[-pi, pi]
-    while raw_yaw > np.pi:
-        raw_yaw -= 2 * np.pi
-    while raw_yaw < -np.pi:
-        raw_yaw += 2 * np.pi
-    horizontal_dist = float(np.sqrt(direction[0]**2 + direction[1]**2))
-    pitch = float(-np.arctan2(direction[2], horizontal_dist))
-    # 限制neck角度范围
-    raw_yaw = float(np.clip(raw_yaw, -1.2, 1.2))
-    pitch = float(np.clip(pitch, -0.5, 0.8))
-    # yaw平滑过渡
-    yaw_diff = raw_yaw - prev_yaw
+    
+    # 内圈：完全不动，保持0位
+    if dist <= inner_radius:
+        target_yaw = 0.0
+        target_pitch = 0.0
+    # 外圈：跟随目标
+    elif dist >= outer_radius:
+        world_yaw = float(np.arctan2(direction[1], direction[0]))
+        raw_yaw = world_yaw - waist_yaw
+        while raw_yaw > np.pi:
+            raw_yaw -= 2 * np.pi
+        while raw_yaw < -np.pi:
+            raw_yaw += 2 * np.pi
+        horizontal_dist = float(np.sqrt(direction[0]**2 + direction[1]**2))
+        pitch = float(-np.arctan2(direction[2], horizontal_dist))
+        target_yaw = float(np.clip(raw_yaw, -1.2, 1.2))
+        target_pitch = float(np.clip(pitch, -0.5, 0.8))
+    # 过渡区：线性插值
+    else:
+        blend = (dist - inner_radius) / (outer_radius - inner_radius)
+        world_yaw = float(np.arctan2(direction[1], direction[0]))
+        raw_yaw = world_yaw - waist_yaw
+        while raw_yaw > np.pi:
+            raw_yaw -= 2 * np.pi
+        while raw_yaw < -np.pi:
+            raw_yaw += 2 * np.pi
+        horizontal_dist = float(np.sqrt(direction[0]**2 + direction[1]**2))
+        pitch = float(-np.arctan2(direction[2], horizontal_dist))
+        full_yaw = float(np.clip(raw_yaw, -1.2, 1.2))
+        full_pitch = float(np.clip(pitch, -0.5, 0.8))
+        target_yaw = full_yaw * blend
+        target_pitch = full_pitch * blend
+    
+    # 平滑过渡
+    yaw_diff = target_yaw - prev_yaw
     while yaw_diff > np.pi:
         yaw_diff -= 2 * np.pi
     while yaw_diff < -np.pi:
         yaw_diff += 2 * np.pi
     yaw = prev_yaw + yaw_diff * 0.1
+    pitch = prev_pitch + (target_pitch - prev_pitch) * 0.1
     return yaw, pitch
 
 
@@ -314,6 +342,7 @@ class HalfBodyIKController:
         
         self.waist_init_pos = self.data.xpos[self.model.body("base_link").id].copy()
         self.prev_neck_yaw = 0.0
+        self.prev_neck_pitch = 0.0
         self.prev_waist_yaw = 0.0
         self.prev_target_yaw = 0.0  # 用于YAW平滑追踪
         
@@ -487,8 +516,8 @@ class HalfBodyIKController:
         max_forward_dist = max(left_forward, right_forward, 0.0)
         
         # 安全范围配置：内圈完全不动，外圈完全补偿
-        waist_safe_zone_inner = 0.35
-        waist_safe_zone_outer = 0.50
+        waist_safe_zone_inner = 0.15
+        waist_safe_zone_outer = 0.25
         
         # 计算blend_factor（基于单手最大距离）
         if max_hand_dist <= waist_safe_zone_inner:
@@ -499,10 +528,10 @@ class HalfBodyIKController:
             blend_factor = (max_hand_dist - waist_safe_zone_inner) / (waist_safe_zone_outer - waist_safe_zone_inner)
             blend_factor = float(np.clip(blend_factor, 0.0, 1.0))
         
-        # YAW内外圈逻辑：安全范围内完全不动，超出范围才跟随
+        # YAW内外圈逻辑：内圈保持0位，外圈跟随，过渡区平滑插值
         target_waist_yaw = compute_waist_yaw(hands_center, self.waist_init_pos, 
-                                             safe_radius=waist_safe_zone_inner, 
-                                             prev_yaw=self.prev_waist_yaw)
+                                             inner_radius=waist_safe_zone_inner, 
+                                             outer_radius=waist_safe_zone_outer)
         # 平滑过渡
         yaw_diff = target_waist_yaw - self.prev_waist_yaw
         while yaw_diff > np.pi:
@@ -517,10 +546,12 @@ class HalfBodyIKController:
                                            cfg_w['deadzone'], cfg_w['compensation_gain'])
         waist_pitch = target_pitch * blend_factor
         
-        # neck look-at（使用局部坐标系）
+        # neck look-at（使用局部坐标系，内外圈逻辑）
         head_pos = self.data.xpos[self.model.body("neck_pitch_link").id]
-        neck_yaw, neck_pitch = compute_neck_angles(head_pos, hands_center, self.prev_neck_yaw, waist_yaw)
+        neck_yaw, neck_pitch = compute_neck_angles(head_pos, hands_center, self.prev_neck_yaw, 
+                                                    self.prev_neck_pitch, waist_yaw)
         self.prev_neck_yaw = neck_yaw
+        self.prev_neck_pitch = neck_pitch
         
         # 复位处理
         if self.reset_state.active:
@@ -535,6 +566,8 @@ class HalfBodyIKController:
             if alpha >= 1.0:
                 self.reset_state.active = False
                 self.prev_waist_yaw = 0.0
+                self.prev_neck_yaw = 0.0
+                self.prev_neck_pitch = 0.0
                 self.prev_target_yaw = 0.0
                 # 清除校准状态，允许重新校准
                 self.vr_calib.done = False

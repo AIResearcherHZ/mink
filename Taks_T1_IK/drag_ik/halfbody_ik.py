@@ -47,8 +47,8 @@ COLLISION_PAIRS = [
 # 腰部配置
 WAIST_CONFIG = {
     'arm_reach': 0.55,
-    'deadzone': 0.10,
-    'compensation_gain': 1.0,
+    'deadzone': 0.15,
+    'compensation_gain': 0.95,
     'yaw_smooth': 0.03,
 }
 
@@ -70,17 +70,22 @@ def slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
 
 
 def compute_waist_yaw(hands_center: np.ndarray, waist_pos: np.ndarray, 
-                      safe_radius: float = 0.35, prev_yaw: float = 0.0) -> float:
-    """计算腰部yaw，内外圈逻辑：安全范围内完全不动"""
+                      inner_radius: float = 0.20, outer_radius: float = 0.40) -> float:
+    """计算腰部yaw，内外圈逻辑：内圈保持0位，外圈跟随目标，过渡区平滑插值"""
     diff = hands_center - waist_pos
     diff[2] = 0
     dist = float(np.linalg.norm(diff))
     
-    if dist <= safe_radius:
-        return prev_yaw
+    if dist <= inner_radius:
+        return 0.0
     
     target_yaw = float(np.arctan2(diff[1], diff[0]))
-    return target_yaw
+    
+    if dist >= outer_radius:
+        return target_yaw
+    
+    blend = (dist - inner_radius) / (outer_radius - inner_radius)
+    return target_yaw * blend
 
 
 def compute_waist_compensation(forward_dist: float, arm_reach: float, deadzone: float, gain: float) -> float:
@@ -92,37 +97,55 @@ def compute_waist_compensation(forward_dist: float, arm_reach: float, deadzone: 
     return float(np.clip(excess * gain, -0.3, 0.3))
 
 
-def compute_neck_angles(head_pos: np.ndarray, target_pos: np.ndarray, prev_yaw: float, waist_yaw: float = 0.0) -> tuple:
-    """计算neck关节角度（yaw, pitch），相对于躯干局部坐标系"""
+def compute_neck_angles(head_pos: np.ndarray, target_pos: np.ndarray, prev_yaw: float, prev_pitch: float, 
+                        waist_yaw: float = 0.0, inner_radius: float = 0.3, outer_radius: float = 0.6) -> tuple:
+    """计算neck关节角度（yaw, pitch），内外圈逻辑：内圈保持0位，外圈跟随目标"""
     direction = target_pos - head_pos
-    dist = np.linalg.norm(direction)
+    dist = float(np.linalg.norm(direction))
     if dist < 1e-6:
-        return prev_yaw, 0.0
+        return prev_yaw, prev_pitch
     direction /= dist
     
-    # 世界坐标系下的yaw
-    world_yaw = np.arctan2(direction[1], direction[0])
-    # 转换为相对于躯干的局部yaw
-    raw_yaw = world_yaw - waist_yaw
-    while raw_yaw > np.pi:
-        raw_yaw -= 2 * np.pi
-    while raw_yaw < -np.pi:
-        raw_yaw += 2 * np.pi
+    # 内圈：完全不动，保持0位
+    if dist <= inner_radius:
+        target_yaw = 0.0
+        target_pitch = 0.0
+    # 外圈：跟随目标
+    elif dist >= outer_radius:
+        world_yaw = float(np.arctan2(direction[1], direction[0]))
+        raw_yaw = world_yaw - waist_yaw
+        while raw_yaw > np.pi:
+            raw_yaw -= 2 * np.pi
+        while raw_yaw < -np.pi:
+            raw_yaw += 2 * np.pi
+        horizontal_dist = float(np.sqrt(direction[0]**2 + direction[1]**2))
+        pitch = float(-np.arctan2(direction[2], horizontal_dist))
+        target_yaw = float(np.clip(raw_yaw, -1.2, 1.2))
+        target_pitch = float(np.clip(pitch, -0.5, 0.8))
+    # 过渡区：线性插值
+    else:
+        blend = (dist - inner_radius) / (outer_radius - inner_radius)
+        world_yaw = float(np.arctan2(direction[1], direction[0]))
+        raw_yaw = world_yaw - waist_yaw
+        while raw_yaw > np.pi:
+            raw_yaw -= 2 * np.pi
+        while raw_yaw < -np.pi:
+            raw_yaw += 2 * np.pi
+        horizontal_dist = float(np.sqrt(direction[0]**2 + direction[1]**2))
+        pitch = float(-np.arctan2(direction[2], horizontal_dist))
+        full_yaw = float(np.clip(raw_yaw, -1.2, 1.2))
+        full_pitch = float(np.clip(pitch, -0.5, 0.8))
+        target_yaw = full_yaw * blend
+        target_pitch = full_pitch * blend
     
-    horizontal_dist = np.sqrt(direction[0]**2 + direction[1]**2)
-    pitch = -np.arctan2(direction[2], horizontal_dist)
-    
-    # 限制neck角度范围
-    raw_yaw = np.clip(raw_yaw, -1.2, 1.2)
-    pitch = np.clip(pitch, -0.5, 0.8)
-    
-    # yaw平滑过渡
-    yaw_diff = raw_yaw - prev_yaw
+    # 平滑过渡
+    yaw_diff = target_yaw - prev_yaw
     while yaw_diff > np.pi:
         yaw_diff -= 2 * np.pi
     while yaw_diff < -np.pi:
         yaw_diff += 2 * np.pi
     yaw = prev_yaw + yaw_diff * 0.1
+    pitch = prev_pitch + (target_pitch - prev_pitch) * 0.1
     
     return yaw, pitch
 
@@ -215,6 +238,7 @@ if __name__ == "__main__":
         # 腰部初始位置（关键：使用base_link而非neck_yaw_link）
         waist_init_pos = data.xpos[model.body("base_link").id].copy()
         prev_neck_yaw = 0.0
+        prev_neck_pitch = 0.0
         prev_waist_yaw = 0.0
         prev_target_yaw = 0.0
         
@@ -245,8 +269,8 @@ if __name__ == "__main__":
             max_forward_dist = max(left_forward, right_forward, 0.0)
             
             # 安全范围配置
-            waist_safe_zone_inner = 0.35
-            waist_safe_zone_outer = 0.50
+            waist_safe_zone_inner = 0.15
+            waist_safe_zone_outer = 0.25
             
             # 计算blend_factor
             if max_hand_dist <= waist_safe_zone_inner:
@@ -257,10 +281,10 @@ if __name__ == "__main__":
                 blend_factor = (max_hand_dist - waist_safe_zone_inner) / (waist_safe_zone_outer - waist_safe_zone_inner)
                 blend_factor = float(np.clip(blend_factor, 0.0, 1.0))
             
-            # YAW内外圈逻辑：安全范围内完全不动
+            # YAW内外圈逻辑：内圈保持0位，外圈跟随，过渡区平滑插值
             target_waist_yaw = compute_waist_yaw(hands_center, waist_init_pos, 
-                                                 safe_radius=waist_safe_zone_inner, 
-                                                 prev_yaw=prev_waist_yaw)
+                                                 inner_radius=waist_safe_zone_inner, 
+                                                 outer_radius=waist_safe_zone_outer)
             yaw_diff = target_waist_yaw - prev_waist_yaw
             while yaw_diff > np.pi:
                 yaw_diff -= 2 * np.pi
@@ -274,10 +298,12 @@ if __name__ == "__main__":
                                                       cfg_w['deadzone'], cfg_w['compensation_gain'])
             waist_pitch = target_pitch * blend_factor
             
-            # neck look-at（使用局部坐标系）
+            # neck look-at（使用局部坐标系，内外圈逻辑）
             head_pos = data.xpos[model.body("neck_pitch_link").id]
-            neck_yaw, neck_pitch = compute_neck_angles(head_pos, hands_center, prev_neck_yaw, waist_yaw)
+            neck_yaw, neck_pitch = compute_neck_angles(head_pos, hands_center, prev_neck_yaw, 
+                                                        prev_neck_pitch, waist_yaw)
             prev_neck_yaw = neck_yaw
+            prev_neck_pitch = neck_pitch
             
             # 复位处理
             if reset_state["active"]:
@@ -292,6 +318,8 @@ if __name__ == "__main__":
                 if alpha >= 1.0:
                     reset_state["active"] = False
                     prev_waist_yaw = 0.0
+                    prev_neck_yaw = 0.0
+                    prev_neck_pitch = 0.0
                     print("[Reset] 复位完成")
                 mujoco.mj_forward(model, data)
                 mujoco.mj_camlight(model, data)
