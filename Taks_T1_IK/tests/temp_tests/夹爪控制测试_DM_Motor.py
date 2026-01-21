@@ -4,11 +4,10 @@
 夹爪控制模块 - 基于DM_Motor.py库驱动
 支持左右手夹爪的开合控制
 """
-
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from libs.drivers.DM_Motor import Motor as DM_Motor, MotorControl as DM_MotorControl, DM_Motor_Type, Control_Type
 from time import sleep
 

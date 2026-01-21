@@ -12,7 +12,6 @@ import mujoco.viewer
 from loop_rate_limiters import RateLimiter
 import time
 
-sys.path.insert(0, str(Path(__file__).parent))
 from taks_sdk import taks
 
 # 模型路径

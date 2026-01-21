@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-踝关节电机测试 - DM_CAN_FD版本
-测试踝关节运动学解算与CAN FD电机驱动的集成
+踝关节电机测试 - DM_Motor版本 (串口通信)
+测试踝关节运动学解算与串口电机驱动的集成
 """
 
 import math
@@ -10,11 +10,11 @@ import time
 import sys
 import os
 import numpy as np
+import serial
 
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-
-from DM_CAN_FD import Motor, MotorControlFD, DM_Motor_Type, Control_Type
-from ankle_kinematics import ankle_ik, ankle_fk, ankle_vel_to_motor_vel, ankle_tau_to_motor_tau
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from libs.drivers.DM_Motor import Motor, MotorControl, DM_Motor_Type, Control_Type
+from libs.drivers.ankle_kinematics import ankle_ik, ankle_fk, ankle_vel_to_motor_vel, ankle_tau_to_motor_tau
 
 
 # 踝关节电机配置 (根据实际硬件修改)
@@ -22,22 +22,27 @@ ANKLE_MOTOR1_ID = 27      # 上电机ID
 ANKLE_MOTOR1_SLAVE = 0xA7 # 上电机从机ID
 ANKLE_MOTOR2_ID = 28      # 下电机ID
 ANKLE_MOTOR2_SLAVE = 0xA8 # 下电机从机ID
-CAN_INTERFACE = 'can0'    # CAN接口
+SERIAL_PORT = '/dev/ttyACM0'  # 串口设备
+BAUDRATE = 921600
 LEFT_LEG = True           # True=左脚, False=右脚
 
 
 def test_ankle_control():
     """踝关节控制测试"""
     print("=" * 60)
-    print("踝关节电机测试 - DM_CAN_FD")
+    print("踝关节电机测试 - DM_Motor (串口)")
     print("=" * 60)
+    
+    # 创建串口
+    ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=0.5)
+    print(f"✓ 串口已打开: {SERIAL_PORT}")
     
     # 创建电机对象
     motor1 = Motor(DM_Motor_Type.DM4340, ANKLE_MOTOR1_ID, ANKLE_MOTOR1_SLAVE)
     motor2 = Motor(DM_Motor_Type.DM4340, ANKLE_MOTOR2_ID, ANKLE_MOTOR2_SLAVE)
     
     # 创建控制器
-    mc = MotorControlFD(can_interface=CAN_INTERFACE)
+    mc = MotorControl(ser)
     mc.addMotor(motor1)
     mc.addMotor(motor2)
     
@@ -89,8 +94,6 @@ def test_ankle_control():
             # 读取当前状态
             theta1 = motor1.getPosition()
             theta2 = motor2.getPosition()
-            vel1 = motor1.getVelocity()
-            vel2 = motor2.getVelocity()
             
             # 正运动学
             pitch, roll = ankle_fk(theta1, theta2, LEFT_LEG)
@@ -114,8 +117,8 @@ def test_ankle_control():
         # 失能电机
         mc.disable(motor1)
         mc.disable(motor2)
-        mc.close()
-        print("✓ 电机已失能并关闭")
+        ser.close()
+        print("✓ 电机已失能，串口已关闭")
 
 
 def test_kinematics_only():

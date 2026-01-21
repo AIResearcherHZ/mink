@@ -9,9 +9,8 @@ import numpy as np
 import sys
 import os
 
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-
-from ankle_kinematics import (
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from libs.drivers.ankle_kinematics import (
     ankle_ik, ankle_fk, 
     compute_jacobian, compute_jacobian_both,
     motor_vel_to_ankle_vel, ankle_vel_to_motor_vel,

@@ -19,7 +19,6 @@ from loop_rate_limiters import RateLimiter
 import mink
 from rich.console import Console
 
-sys.path.insert(0, str(Path(__file__).parent))
 from vr_interface import VRReceiver
 from taks_sdk import taks
 
@@ -653,8 +652,8 @@ class HalfBodyIKController:
         self.send_to_real(mit_cmd)
         
         # 夹爪控制（VR扳机）
-        left_gripper_percent = vr_data.left_hand.gripper * 100.0
-        right_gripper_percent = vr_data.right_hand.gripper * 100.0
+        left_gripper_percent = vr_data.left_hand.gripper
+        right_gripper_percent = vr_data.right_hand.gripper
         self.send_gripper_cmd(left_gripper_percent, right_gripper_percent)
         
         return mit_cmd
@@ -723,9 +722,9 @@ if __name__ == "__main__":
     parser.add_argument("--headless", action="store_true", default=False, help="无头模式")
     parser.add_argument("--host", type=str, default="192.168.5.16", help="taks服务器地址")
     parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
-    parser.add_argument("--no-real", action="store_true", default=True, help="禁用真机控制")
-    parser.add_argument("--no-ramp-up", action="store_true", default=True, help="禁用缓启动")
-    parser.add_argument("--no-ramp-down", action="store_true", default=True, help="禁用缓停止")
+    parser.add_argument("--no-real", action="store_true", default=False, help="禁用真机控制")
+    parser.add_argument("--no-ramp-up", action="store_true", default=False, help="禁用缓启动")
+    parser.add_argument("--no-ramp-down", action="store_true", default=False, help="禁用缓停止")
     args = parser.parse_args()
     
     controller = HalfBodyIKController(

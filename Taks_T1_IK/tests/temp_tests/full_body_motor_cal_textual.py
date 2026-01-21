@@ -14,6 +14,7 @@ import sys
 import os
 import time
 import threading
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from libs.drivers.DM_CAN_FD import Motor, MotorControlFD, DM_Motor_Type
 

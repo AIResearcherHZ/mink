@@ -1,7 +1,26 @@
 """
 半身IK录制回放
 录制: 记录MIT命令参数到.npz文件
-回放: 加载录制文件，支持循环播放、缓启动/停止
+回放: 加载录制文件，支持循环播放、缓启动/缓停止
+
+# 快速使用(默认 host=192.168.5.16 port=5555):
+# 录制: python halfbody_record_playback.py record -o demo.npz --fps 30
+# 回放: python halfbody_record_playback.py play -i demo.npz --loop
+#
+# 录制操作: 
+#   - VR校准: 双击B键或按C键
+#   - 停止录制: 双击A按钮 → 保存文件 → 自动复位 → 退出
+#   - 强制退出: Ctrl+C (不推荐)
+#
+# 回放操作:
+#   - 停止: Ctrl+C或关闭窗口 → 自动缓停止退出
+#   - 后台播放: 添加 --headless
+#
+# 安全选项:
+#   - --no-real: 仅仿真模式
+#   - --no-ramp-up/--no-ramp-down: 禁用缓启动/缓停止(不推荐)
+#
+# 详细说明: docs/VR遥操作使用说明.md
 """
 
 import sys
@@ -17,7 +36,6 @@ import mujoco
 import mujoco.viewer
 from rich.console import Console
 
-sys.path.insert(0, str(Path(__file__).parent))
 from halfbody_ik_vr import (
     HalfBodyIKController, SDK_JOINT_GAINS, SAFE_KP_KD, SDK_ID_TO_NAME,
     TAKS_SEND_RATE, RAMP_UP_TIME, RAMP_DOWN_TIME, ease_in, ease_out,
@@ -119,11 +137,47 @@ class Recorder:
         self.left_gripper = self.controller.left_gripper
         self.right_gripper = self.controller.right_gripper
         
-        # 禁用控制器的缓启动/停止(录制时不需要)
+        # 禁用控制器的缓启动(录制时不需要)，但保留缓停止用于安全退出
         self.controller.enable_ramp_up = False
-        self.controller.enable_ramp_down = False
         self.controller.ramp_state.active = False
         self.controller.ramp_state.progress = 1.0
+        
+        # 双击手柄停止录制状态
+        self.stop_requested = False
+        self.reset_triggered = False
+    
+    def _ramp_down(self):
+        """缓停止：逐渐降低增益并移动到安全位置"""
+        if not self.controller.sim2real or not self.controller.taks_client:
+            return
+        
+        ramp_time = RAMP_DOWN_TIME
+        start = time.time()
+        
+        while time.time() - start < ramp_time:
+            t = (time.time() - start) / ramp_time
+            scale = 1.0 - ease_in(t)
+            
+            mit_cmd = {}
+            for sdk_id in self.controller.joint_mapping.values():
+                sdk_id = sdk_id['sdk_id']
+                kp, kd = SDK_JOINT_GAINS.get(sdk_id, (10, 1))
+                safe_kp, safe_kd = SAFE_KP_KD.get(sdk_id, (5, 1))
+                target_q = SAFE_FALL_POSITIONS.get(sdk_id, 0.0)
+                
+                mit_cmd[sdk_id] = {
+                    'q': target_q,
+                    'dq': 0.0,
+                    'tau': 0.0,
+                    'kp': safe_kp + (kp - safe_kp) * scale,
+                    'kd': safe_kd + (kd - safe_kd) * scale
+                }
+            
+            try:
+                self.controller.taks_client.controlMIT(mit_cmd)
+            except Exception:
+                break
+            time.sleep(0.01)
     
     def _signal_handler(self, signum, frame):
         if self.shutdown_requested:
@@ -139,7 +193,7 @@ class Recorder:
         
         print(f"[录制] 开始录制，输出: {self.output_path}")
         print(f"[录制] 模式: {'无头' if self.headless else '有头(MuJoCo)'} | 录制帧率: {self.record_fps}Hz")
-        print("[录制] Ctrl+C 停止录制并保存")
+        print("[录制] 双击任意手柄按钮停止录制 | Ctrl+C强制退出")
         
         try:
             if self.headless:
@@ -153,7 +207,9 @@ class Recorder:
             import traceback
             traceback.print_exc()
         finally:
-            self.record_data.save(self.output_path)
+            # 如果是正常双击A退出，文件已保存；否则保存
+            if not self.stop_requested:
+                self.record_data.save(self.output_path)
             self.controller.close()
     
     def _run_headless(self):
@@ -206,8 +262,28 @@ class Recorder:
             mit_cmd = self.controller.step()
             vr_data = self.controller.vr.data
             
-            left_gripper = vr_data.left_hand.gripper * 100.0
-            right_gripper = vr_data.right_hand.gripper * 100.0
+            # 检测双击A按钮：触发复位（复位过程中继续录制）
+            if not self.stop_requested:
+                if vr_data.button_events.right_a:
+                    self.stop_requested = True
+                    print("\n[Reset] 检测到双击A，开始复位...")
+                    self.controller.reset()
+                    self.reset_triggered = True
+            
+            # 如果复位完成，停止录制并保存
+            if self.reset_triggered and not self.controller.reset_state.active:
+                print(f"[Reset] 完成")
+                print(f"[录制] 停止录制 (共 {frame_count} 帧)")
+                print("[录制] 保存文件...")
+                self.record_data.save(self.output_path)
+                print("[录制] 缓停止...")
+                self._ramp_down()
+                print("[录制] 退出")
+                self.running = False
+                break
+            
+            left_gripper = vr_data.left_hand.gripper
+            right_gripper = vr_data.right_hand.gripper
             
             # 发送夹爪控制命令到真机
             if self.controller.sim2real:
@@ -217,7 +293,7 @@ class Recorder:
                     if self.right_gripper:
                         self.right_gripper.controlMIT(percent=right_gripper, kp=1.5, kd=0.1)
                 except Exception:
-                    pass  # 忽略发送错误
+                    pass
             
             now = time.time()
             if now - last_record_time >= self.record_interval:

@@ -3,7 +3,7 @@ import numpy as np
 from enum import IntEnum
 from struct import unpack
 from struct import pack
-from libs.drivers.ankle_kinematics import (
+from .ankle_kinematics import (
     ankle_ik,
     ankle_fk,
     motor_vel_to_ankle_vel,

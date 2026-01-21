@@ -14,8 +14,7 @@ import time
 import os
 from collections import deque
 
-# 添加驱动路径
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 try:
     from rich.console import Console
@@ -25,7 +24,7 @@ except ImportError:
     print("请先安装 rich 库: pip install rich")
     exit(1)
 
-from drivers.DM_CAN_FD import Motor, MotorControlFD, DM_Motor_Type
+from libs.drivers.DM_CAN_FD import Motor, MotorControlFD, DM_Motor_Type
 
 # ============ 测试配置 ============
 CAN_INTERFACE = "can1"  # CAN 接口名称

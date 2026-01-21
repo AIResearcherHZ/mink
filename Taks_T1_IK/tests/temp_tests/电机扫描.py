@@ -11,8 +11,8 @@ import os
 import time
 import math
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from drivers.DM_CAN_FD import Motor, MotorControlFD, DM_Motor_Type
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from libs.drivers.DM_CAN_FD import Motor, MotorControlFD, DM_Motor_Type
 
 # ANSI 颜色定义
 class Color:
