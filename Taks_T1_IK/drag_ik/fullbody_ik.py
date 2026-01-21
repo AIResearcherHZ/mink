@@ -67,6 +67,15 @@ WAIST_CONFIG = {
 # 手臂偏置配置
 ARM_BIAS_CONFIG = {'outward_bias': 0.35, 'downward_bias': 0.2, 'bias_cost': 1e-1}
 
+# 向后检测配置
+BACKWARD_CONFIG = {
+    'threshold': -0.05,  # 向后检测阈值
+    'blend_range': 0.15,  # 过渡区范围
+    'normal_orient_cost': 2.0,  # 正常姿态权重
+    'backward_orient_cost': 0.1,  # 向后时姿态权重
+    'smooth_alpha': 0.1,  # EMA平滑系数（越小越平滑，建议0.05-0.2）
+}
+
 
 # ==================== 工具函数 ====================
 
@@ -127,11 +136,22 @@ def compute_local_forward_dist(hand_pos: np.ndarray, waist_pos: np.ndarray, wais
     """计算手在腰部局部坐标系下的前向距离（考虑yaw旋转）"""
     diff = hand_pos - waist_pos
     diff[2] = 0
-    # 将世界坐标系的diff旋转到腰部局部坐标系
     cos_yaw = np.cos(-waist_yaw)
     sin_yaw = np.sin(-waist_yaw)
     local_x = diff[0] * cos_yaw - diff[1] * sin_yaw
     return float(local_x)
+
+
+def compute_backward_factor(forward_dist: float, cfg: dict) -> float:
+    """计算向后程度因子（0=正常，1=完全向后）"""
+    threshold = cfg['threshold']
+    blend_range = cfg['blend_range']
+    if forward_dist >= threshold:
+        return 0.0
+    elif forward_dist <= threshold - blend_range:
+        return 1.0
+    else:
+        return (threshold - forward_dist) / blend_range
 
 
 def compute_neck_angles(head_pos: np.ndarray, target_pos: np.ndarray, prev_yaw: float, prev_pitch: float, 
@@ -276,6 +296,10 @@ if __name__ == "__main__":
         prev_waist_yaw = 0.0
         prev_target_yaw = 0.0
         
+        # backward_factor平滑状态
+        smooth_left_backward = 0.0
+        smooth_right_backward = 0.0
+        
         rate = RateLimiter(frequency=100.0, warn=False)
         dt = rate.dt
         reset_duration = 1.5
@@ -322,18 +346,31 @@ if __name__ == "__main__":
                 yaw_diff += 2 * np.pi
             waist_yaw = prev_waist_yaw + yaw_diff * 0.15
             
-            # 用世界坐标系判断是否在身后（用于禁用yaw）
+            # 用世界坐标系判断每只手是否在身后
             left_forward_world = compute_local_forward_dist(data.mocap_pos[left_mid], waist_init_pos, 0.0)
             right_forward_world = compute_local_forward_dist(data.mocap_pos[right_mid], waist_init_pos, 0.0)
-            is_backward = (left_forward_world < -0.2 and right_forward_world < -0.2)
             
-            if is_backward:
-                # 后仰模式：禁用yaw跟随，保持0位
-                waist_yaw = 0.0
-                prev_waist_yaw = 0.0
-            else:
-                # 正常模式：应用计算的yaw
-                prev_waist_yaw = waist_yaw
+            # 计算每只手的向后程度
+            bw_cfg = BACKWARD_CONFIG
+            left_backward_raw = compute_backward_factor(left_forward_world, bw_cfg)
+            right_backward_raw = compute_backward_factor(right_forward_world, bw_cfg)
+            
+            # EMA平滑（避免突变）
+            alpha = bw_cfg['smooth_alpha']
+            smooth_left_backward = alpha * left_backward_raw + (1.0 - alpha) * smooth_left_backward
+            smooth_right_backward = alpha * right_backward_raw + (1.0 - alpha) * smooth_right_backward
+            
+            # 动态调整末端姿态权重（向后时降低姿态跟踪，防止翻转）
+            left_orient_cost = bw_cfg['normal_orient_cost'] * (1.0 - smooth_left_backward) + bw_cfg['backward_orient_cost'] * smooth_left_backward
+            right_orient_cost = bw_cfg['normal_orient_cost'] * (1.0 - smooth_right_backward) + bw_cfg['backward_orient_cost'] * smooth_right_backward
+            ee_tasks["left_hand"].set_orientation_cost(left_orient_cost)
+            ee_tasks["right_hand"].set_orientation_cost(right_orient_cost)
+            
+            # 任一手在身后时，锁定腰部yaw
+            is_any_backward = (smooth_left_backward > 0.5 or smooth_right_backward > 0.5)
+            if is_any_backward:
+                waist_yaw = prev_waist_yaw * 0.95
+            prev_waist_yaw = waist_yaw
             
             # 用当前yaw的局部坐标系计算前向距离（用于pitch补偿）
             left_forward = compute_local_forward_dist(data.mocap_pos[left_mid], waist_init_pos, waist_yaw)
@@ -370,6 +407,8 @@ if __name__ == "__main__":
                     prev_waist_yaw = 0.0
                     prev_neck_yaw = 0.0
                     prev_neck_pitch = 0.0
+                    smooth_left_backward = 0.0
+                    smooth_right_backward = 0.0
                     print("[Reset] 复位完成")
                 mujoco.mj_forward(model, data)
                 mujoco.mj_camlight(model, data)

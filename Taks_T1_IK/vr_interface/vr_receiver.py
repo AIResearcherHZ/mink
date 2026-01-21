@@ -66,9 +66,10 @@ def slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
 class VRReceiver:
     """VR UDP接收器"""
     
-    def __init__(self, ip: str = UDP_IP, port: int = UDP_PORT, convert_quat: bool = True):
+    def __init__(self, ip: str = UDP_IP, port: int = UDP_PORT, convert_quat: bool = True, gripper_alpha: float = 0.3):
         self.ip, self.port = ip, port
         self.convert_quat = convert_quat
+        self.gripper_alpha = gripper_alpha  # 扳机EMA平滑系数（较小值（0.1-0.2）：更平滑，但响应稍慢；较大值（0.5-0.7）：响应快，但平滑效果减弱）
         self._data = VRData()  # 平滑后数据
         self._init = False  # 是否已初始化
         self._btn = {"left_x": False, "left_y": False, "right_a": False, "right_b": False}
@@ -81,6 +82,7 @@ class VRReceiver:
         self._last_tracking_state: Optional[bool] = None  # 上次追踪状态
         self._state_change_time: float = 0.0  # 状态变更时间
         self._state_change_callback: Optional[Callable[[bool], None]] = None  # 状态变更回调
+        self._gripper_init = {"head": False, "left_hand": False, "right_hand": False}  # 扳机是否已初始化
     
     @property
     def data(self) -> VRData:
@@ -143,20 +145,28 @@ class VRReceiver:
         """重置平滑状态(校准后调用)"""
         with self._lock:
             self._init = False
+            self._gripper_init = {"head": False, "left_hand": False, "right_hand": False}
     
-    def _parse_pose(self, d: dict, pose: VRPose) -> None:
-        """解析位姿（直接使用原始数据，无平滑）"""
+    def _parse_pose(self, d: dict, pose: VRPose, pose_name: str = "unknown") -> None:
+        """解析位姿（位置/四元数直接使用，扳机EMA平滑）"""
         if "position" not in d:
             return
         pos = np.array(d["position"], dtype=np.float64)
         quat = np.array(d.get("quaternion", [1, 0, 0, 0]), dtype=np.float64)
         if self.convert_quat:
             quat = unity_to_mujoco_quat(quat)
-        grip = float(d.get("gripper", 0.0))
+        grip_raw = float(d.get("gripper", 0.0))
+        
+        # 扳机EMA平滑
+        if not self._gripper_init.get(pose_name, False):
+            grip_smooth = grip_raw
+            self._gripper_init[pose_name] = True
+        else:
+            grip_smooth = self.gripper_alpha * grip_raw + (1 - self.gripper_alpha) * pose.gripper
         
         pose.position = pos.copy()
         pose.quaternion = quat.copy()
-        pose.gripper = grip
+        pose.gripper = grip_smooth
     
     def _parse_buttons(self, d: dict) -> None:
         """解析按键事件"""
@@ -197,11 +207,11 @@ class VRReceiver:
                 d = json.loads(data_bytes.decode('utf-8'))
                 with self._lock:
                     if "head" in d:
-                        self._parse_pose(d["head"], self._data.head)
+                        self._parse_pose(d["head"], self._data.head, "head")
                     if "leftHand" in d:
-                        self._parse_pose(d["leftHand"], self._data.left_hand)
+                        self._parse_pose(d["leftHand"], self._data.left_hand, "left_hand")
                     if "rightHand" in d:
-                        self._parse_pose(d["rightHand"], self._data.right_hand)
+                        self._parse_pose(d["rightHand"], self._data.right_hand, "right_hand")
                     # 首次收到完整数据后标记初始化完成
                     if "head" in d and "leftHand" in d and "rightHand" in d:
                         self._init = True

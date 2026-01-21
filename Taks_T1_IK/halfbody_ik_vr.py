@@ -74,6 +74,15 @@ END_EFFECTORS = {
     "right_hand": ("right_wrist_pitch_link", "right_hand_target"),
 }
 
+# 向后检测配置
+BACKWARD_CONFIG = {
+    'threshold': -0.05,  # 向后检测阈值（世界坐标系x轴）
+    'blend_range': 0.15,  # 过渡区范围
+    'normal_orient_cost': 5.0,  # 正常姿态权重
+    'backward_orient_cost': 0.1,  # 向后时姿态权重
+    'smooth_alpha': 0.1,  # EMA平滑系数（越小越平滑，建议0.05-0.2）
+}
+
 # COLLISION_PAIRS = [
 #     (["torso_collision"], ["left_hand_collision", "right_hand_collision"]),
 #     (["torso_collision"], ["left_elbow_collision", "right_elbow_collision"]),
@@ -368,7 +377,11 @@ class HalfBodyIKController:
         self.prev_neck_yaw = 0.0
         self.prev_neck_pitch = 0.0
         self.prev_waist_yaw = 0.0
-        self.prev_target_yaw = 0.0  # 用于YAW平滑追踪
+        self.prev_target_yaw = 0.0
+        
+        # backward_factor平滑状态
+        self.smooth_left_backward = 0.0
+        self.smooth_right_backward = 0.0
         
         # mocap速度限制器
         self.mocap_limiter = MocapRateLimiter()
@@ -378,6 +391,17 @@ class HalfBodyIKController:
         self.ramp_state = RampState()
         self.reset_state = ResetState()
         self.last_mit_cmd = None
+    
+    def _compute_backward_factor(self, forward_dist: float, cfg: dict) -> float:
+        """计算向后程度因子（0=正常前方，1=完全向后）"""
+        threshold = cfg['threshold']
+        blend_range = cfg['blend_range']
+        if forward_dist >= threshold:
+            return 0.0
+        elif forward_dist <= threshold - blend_range:
+            return 1.0
+        else:
+            return (threshold - forward_dist) / blend_range
     
     def _start_sdk_server(self):
         sdk_path = Path(__file__).parent / "taks_sdk" / "SDK_MF.py"
@@ -565,18 +589,31 @@ class HalfBodyIKController:
             yaw_diff += 2 * np.pi
         waist_yaw = self.prev_waist_yaw + yaw_diff * 0.15
         
-        # 用世界坐标系判断是否在身后（用于禁用yaw）
+        # 用世界坐标系判断每只手是否在身后
         left_forward_world = compute_local_forward_dist(self.data.mocap_pos[left_mid], self.waist_init_pos, 0.0)
         right_forward_world = compute_local_forward_dist(self.data.mocap_pos[right_mid], self.waist_init_pos, 0.0)
-        is_backward = (left_forward_world < -0.2 and right_forward_world < -0.2)
         
-        if is_backward:
-            # 后仰模式：禁用yaw跟随，保持0位
-            waist_yaw = 0.0
-            self.prev_waist_yaw = 0.0
-        else:
-            # 正常模式：应用计算的yaw
-            self.prev_waist_yaw = waist_yaw
+        # 计算每只手的向后程度（0=正常，1=完全向后）
+        bw_cfg = BACKWARD_CONFIG
+        left_backward_raw = self._compute_backward_factor(left_forward_world, bw_cfg)
+        right_backward_raw = self._compute_backward_factor(right_forward_world, bw_cfg)
+        
+        # EMA平滑（避免突变）
+        alpha = bw_cfg['smooth_alpha']
+        self.smooth_left_backward = alpha * left_backward_raw + (1.0 - alpha) * self.smooth_left_backward
+        self.smooth_right_backward = alpha * right_backward_raw + (1.0 - alpha) * self.smooth_right_backward
+        
+        # 动态调整末端姿态权重（向后时降低姿态跟踪，防止翻转）
+        left_orient_cost = bw_cfg['normal_orient_cost'] * (1.0 - self.smooth_left_backward) + bw_cfg['backward_orient_cost'] * self.smooth_left_backward
+        right_orient_cost = bw_cfg['normal_orient_cost'] * (1.0 - self.smooth_right_backward) + bw_cfg['backward_orient_cost'] * self.smooth_right_backward
+        self.ee_tasks["left_hand"].set_orientation_cost(left_orient_cost)
+        self.ee_tasks["right_hand"].set_orientation_cost(right_orient_cost)
+        
+        # 任一手在身后时，锁定腰部yaw
+        is_any_backward = (self.smooth_left_backward > 0.5 or self.smooth_right_backward > 0.5)
+        if is_any_backward:
+            waist_yaw = self.prev_waist_yaw * 0.95  # 平滑回归
+        self.prev_waist_yaw = waist_yaw
         
         # 用当前yaw的局部坐标系计算前向距离（用于pitch补偿）
         left_forward = compute_local_forward_dist(self.data.mocap_pos[left_mid], self.waist_init_pos, waist_yaw)
@@ -614,6 +651,8 @@ class HalfBodyIKController:
                 self.prev_neck_yaw = 0.0
                 self.prev_neck_pitch = 0.0
                 self.prev_target_yaw = 0.0
+                self.smooth_left_backward = 0.0
+                self.smooth_right_backward = 0.0
                 # 清除校准状态，允许重新校准
                 self.vr_calib.done = False
                 print("[Reset] 完成，可重新校准")
@@ -722,9 +761,9 @@ if __name__ == "__main__":
     parser.add_argument("--headless", action="store_true", default=False, help="无头模式")
     parser.add_argument("--host", type=str, default="192.168.5.16", help="taks服务器地址")
     parser.add_argument("--port", type=int, default=5555, help="taks服务器端口")
-    parser.add_argument("--no-real", action="store_true", default=False, help="禁用真机控制")
-    parser.add_argument("--no-ramp-up", action="store_true", default=False, help="禁用缓启动")
-    parser.add_argument("--no-ramp-down", action="store_true", default=False, help="禁用缓停止")
+    parser.add_argument("--no-real", action="store_true", default=True, help="禁用真机控制")
+    parser.add_argument("--no-ramp-up", action="store_true", default=True, help="禁用缓启动")
+    parser.add_argument("--no-ramp-down", action="store_true", default=True, help="禁用缓停止")
     args = parser.parse_args()
     
     controller = HalfBodyIKController(
