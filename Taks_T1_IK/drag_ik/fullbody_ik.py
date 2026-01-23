@@ -346,9 +346,9 @@ if __name__ == "__main__":
                 yaw_diff += 2 * np.pi
             waist_yaw = prev_waist_yaw + yaw_diff * 0.15
             
-            # 用世界坐标系判断每只手是否在身后
-            left_forward_world = compute_local_forward_dist(data.mocap_pos[left_mid], waist_init_pos, 0.0)
-            right_forward_world = compute_local_forward_dist(data.mocap_pos[right_mid], waist_init_pos, 0.0)
+            # 用当前腰部朝向判断每只手是否在身后
+            left_forward_world = compute_local_forward_dist(data.mocap_pos[left_mid], waist_init_pos, waist_yaw)
+            right_forward_world = compute_local_forward_dist(data.mocap_pos[right_mid], waist_init_pos, waist_yaw)
             
             # 计算每只手的向后程度
             bw_cfg = BACKWARD_CONFIG
